@@ -1,0 +1,5 @@
+.venv\Scripts\activate
+
+pip install trimesh PyOpenGL shapely rtree assa
+
+111
