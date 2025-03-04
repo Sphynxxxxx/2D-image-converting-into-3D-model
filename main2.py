@@ -4,10 +4,138 @@ import numpy as np
 import trimesh
 from PIL import Image
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                           QPushButton, QLabel, QFileDialog, QMessageBox, QGroupBox)
+                           QPushButton, QLabel, QFileDialog, QMessageBox, QGroupBox, QComboBox)
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 import pyqtgraph.opengl as gl
+
+class BackgroundRemover:
+    """Background removal class with multiple methods for flexibility"""
+    
+    def __init__(self):
+        self.methods = {
+            "grabcut": self.remove_background_grabcut,
+        }
+        self.current_method = "grabcut"  # Default method
+    
+    def set_method(self, method_name):
+        """Set the background removal method"""
+        if method_name in self.methods:
+            self.current_method = method_name
+            return True
+        return False
+    
+    def remove_background(self, image):
+        """Remove background using the current method"""
+        return self.methods[self.current_method](image)
+    
+    def remove_background_grabcut(self, image):
+        """Remove background using GrabCut algorithm"""
+        # Create initial mask
+        mask = np.zeros(image.shape[:2], np.uint8)
+        
+        # Approximate foreground and background model
+        bgd_model = np.zeros((1, 65), np.float64)
+        fgd_model = np.zeros((1, 65), np.float64)
+        
+        # Create a rectangle around the object
+        height, width = image.shape[:2]
+        rect = (width//10, height//10, width*8//10, height*8//10)
+        
+        # Apply GrabCut
+        cv2.grabCut(image, mask, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
+        
+        # Create mask where sure and probable foreground are set to 1
+        mask2 = np.where((mask==2)|(mask==0), 0, 1).astype('uint8')
+        
+        # Create output image
+        output = image.copy()
+        output = output * mask2[:, :, np.newaxis]
+        
+        # Create transparent background (alpha channel)
+        alpha = np.ones((height, width), dtype=np.uint8) * 255
+        alpha = alpha * mask2
+        
+        # Add alpha channel to image
+        rgba = cv2.cvtColor(output, cv2.COLOR_BGR2BGRA)
+        rgba[:, :, 3] = alpha
+        
+        return rgba, mask2
+    
+    def remove_background_threshold(self, image):
+        """Remove background using adaptive thresholding"""
+        # Convert to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Apply Gaussian blur
+        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+        
+        # Apply adaptive thresholding
+        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                     cv2.THRESH_BINARY_INV, 11, 2)
+        
+        # Clean up the mask
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        
+        # Find contours to get the main object
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Create a clean mask with only the largest contour
+        clean_mask = np.zeros_like(mask)
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            cv2.drawContours(clean_mask, [largest_contour], -1, 255, -1)
+        
+        # Create output image
+        output = image.copy()
+        output = output * (clean_mask[:, :, np.newaxis] / 255)
+        
+        # Create transparent background (alpha channel)
+        height, width = image.shape[:2]
+        alpha = clean_mask.copy()
+        
+        # Add alpha channel to image
+        rgba = cv2.cvtColor(output, cv2.COLOR_BGR2BGRA)
+        rgba[:, :, 3] = alpha
+        
+        return rgba, clean_mask
+    
+    def remove_background_deep(self, image):
+        """
+        Background removal using a simplified algorithm
+        Note: This is a placeholder for a more advanced deep learning approach
+        You would typically use libraries like MediaPipe or specific DL models here
+        """
+        # For now, this is just a combination of the above methods for better results
+        # Create a hybrid mask using both techniques
+        
+        # Get masks from both methods
+        _, grabcut_mask = self.remove_background_grabcut(image)
+        _, threshold_mask = self.remove_background_threshold(image)
+        
+        # Combine masks
+        combined_mask = cv2.bitwise_or(grabcut_mask, threshold_mask)
+        
+        # Clean up the mask
+        kernel = np.ones((5, 5), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+        
+        # Create output image
+        output = image.copy()
+        output = output * (combined_mask[:, :, np.newaxis])
+        
+        # Create transparent background (alpha channel)
+        height, width = image.shape[:2]
+        alpha = combined_mask * 255
+        
+        # Add alpha channel to image
+        rgba = cv2.cvtColor(output, cv2.COLOR_BGR2BGRA)
+        rgba[:, :, 3] = alpha
+        
+        return rgba, combined_mask
 
 class EnhancedMeshGenerator(QThread):
     finished = pyqtSignal(np.ndarray, np.ndarray, np.ndarray)
@@ -231,9 +359,114 @@ class MainWindow(QMainWindow):
                 color: #ffffff;
             }
         """)
+        
+        # Initialize background removal
+        self.init_bg_removal()
+        
         self.init_ui()
         self.image_path = None
         self.current_mesh = None
+
+    def init_bg_removal(self):
+        """Initialize background removal feature"""
+        self.bg_remover = BackgroundRemover()
+        self.original_image = None
+        self.processed_image = None
+        self.mask = None
+        
+        # Create button style as property for reuse
+        self.button_style = """
+            QPushButton {
+                background-color: #363636;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #404040;
+            }
+            QPushButton:pressed {
+                background-color: #505050;
+            }
+            QPushButton:disabled {
+                background-color: #2a2a2a;
+                color: #606060;
+            }
+        """
+
+    def add_background_removal_ui(self):
+        # Background removal group
+        bg_removal_group = QGroupBox("Background Removal")
+        bg_removal_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #404040;
+                border-radius: 6px;
+                margin-top: 6px;
+                padding-top: 10px;
+                background-color: #2d2d2d;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: #ffffff;
+            }
+        """)
+        bg_removal_layout = QVBoxLayout(bg_removal_group)
+        
+        # Method selection
+        method_layout = QHBoxLayout()
+        method_label = QLabel("Method:")
+        self.method_combo = QComboBox()
+        self.method_combo.addItems(["GrabCut"])
+        self.method_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #363636;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 5px;
+                min-height: 25px;
+            }
+            QComboBox:hover {
+                background-color: #404040;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #363636;
+                color: white;
+                selection-background-color: #505050;
+            }
+        """)
+        method_layout.addWidget(method_label)
+        method_layout.addWidget(self.method_combo)
+        
+        # Remove background button
+        self.remove_bg_button = QPushButton("🎭 Remove Background")
+        self.remove_bg_button.setMinimumHeight(40)
+        self.remove_bg_button.setEnabled(False)
+        self.remove_bg_button.setStyleSheet(self.button_style)
+        self.remove_bg_button.clicked.connect(self.remove_background)
+        
+        # Reset button
+        self.reset_image_button = QPushButton("↩️ Reset Image")
+        self.reset_image_button.setMinimumHeight(40)
+        self.reset_image_button.setEnabled(False)
+        self.reset_image_button.setStyleSheet(self.button_style)
+        self.reset_image_button.clicked.connect(self.reset_image)
+        
+        # Add to layout
+        bg_removal_layout.addLayout(method_layout)
+        bg_removal_layout.addWidget(self.remove_bg_button)
+        bg_removal_layout.addWidget(self.reset_image_button)
+        
+        return bg_removal_group
 
     def init_ui(self):
         main_widget = QWidget()
@@ -283,6 +516,9 @@ class MainWindow(QMainWindow):
         """)
         image_layout.addWidget(self.image_label)
         
+        # Background removal group
+        bg_removal_group = self.add_background_removal_ui()
+        
         # Controls group
         controls_group = QGroupBox("Controls")
         controls_group.setStyleSheet("""
@@ -303,43 +539,21 @@ class MainWindow(QMainWindow):
         """)
         controls_layout = QVBoxLayout(controls_group)
         
-        # Style for all buttons
-        button_style = """
-            QPushButton {
-                background-color: #363636;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 8px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #404040;
-            }
-            QPushButton:pressed {
-                background-color: #505050;
-            }
-            QPushButton:disabled {
-                background-color: #2a2a2a;
-                color: #606060;
-            }
-        """
-        
         self.select_button = QPushButton("📁 Select Image")
         self.select_button.setMinimumHeight(40)
-        self.select_button.setStyleSheet(button_style)
-        self.select_button.clicked.connect(self.select_image)
+        self.select_button.setStyleSheet(self.button_style)
+        self.select_button.clicked.connect(self.select_image_with_bg_removal)
         
         self.convert_button = QPushButton("🔄 Generate 3D Model")
         self.convert_button.setMinimumHeight(40)
         self.convert_button.setEnabled(False)
-        self.convert_button.setStyleSheet(button_style)
+        self.convert_button.setStyleSheet(self.button_style)
         self.convert_button.clicked.connect(self.convert_to_3d)
         
         self.export_button = QPushButton("💾 Export 3D Model")
         self.export_button.setMinimumHeight(40)
         self.export_button.setEnabled(False)
-        self.export_button.setStyleSheet(button_style)
+        self.export_button.setStyleSheet(self.button_style)
         self.export_button.clicked.connect(self.export_mesh)
         
         controls_layout.addWidget(self.select_button)
@@ -348,6 +562,7 @@ class MainWindow(QMainWindow):
         
         # Add groups to left panel
         left_layout.addWidget(image_group)
+        left_layout.addWidget(bg_removal_group)
         left_layout.addWidget(controls_group)
         left_layout.addStretch()
         
@@ -394,7 +609,7 @@ class MainWindow(QMainWindow):
         
         self.setCentralWidget(main_widget)
 
-    def select_image(self):
+    def select_image_with_bg_removal(self):
         file_name, _ = QFileDialog.getOpenFileName(
             self,
             "Select Image",
@@ -403,22 +618,120 @@ class MainWindow(QMainWindow):
         )
         if file_name:
             self.image_path = file_name
+            
+            # Reset processed image
+            self.processed_image = None
+            self.original_image = None
+            
+            # Load and display image
             pixmap = QPixmap(file_name)
             self.image_label.setPixmap(pixmap.scaled(
                 self.image_label.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             ))
+            
+            # Enable buttons
             self.convert_button.setEnabled(True)
+            self.remove_bg_button.setEnabled(True)
+            self.reset_image_button.setEnabled(False)
+
+    def remove_background(self):
+        """Remove background from the current image"""
+        if not self.image_path:
+            return
+            
+        # Get the current image
+        if hasattr(self, 'original_image') and self.original_image is not None:
+            image = self.original_image.copy()
+        else:
+            image = cv2.imread(self.image_path)
+            self.original_image = image.copy()
+        
+        if image is None:
+            QMessageBox.warning(
+                self,
+                "Error",
+                "Failed to load image. Please select a different image."
+            )
+            return
+        
+        try:
+            # Get the selected method
+            method_text = self.method_combo.currentText().lower()
+            method_map = {
+                "grabcut": "grabcut",
+                "thresholding": "thresholding",
+                "deep": "deep"
+            }
+            method = method_map.get(method_text, "grabcut")
+            
+            # Remove background
+            self.bg_remover.set_method(method)
+            self.processed_image, self.mask = self.bg_remover.remove_background(image)
+            
+            # Convert BGRA to QPixmap
+            height, width, channel = self.processed_image.shape
+            bytes_per_line = 4 * width
+            q_img = QImage(self.processed_image.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(q_img)
+            
+            # Display the processed image
+            self.image_label.setPixmap(pixmap.scaled(
+                self.image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+            
+            # Enable reset button
+            self.reset_image_button.setEnabled(True)
+            
+        except Exception as e:
+            print(f"Error removing background: {str(e)}")
+            QMessageBox.warning(
+                self,
+                "Error",
+                f"Failed to remove background: {str(e)}"
+            )
+
+    def reset_image(self):
+        """Reset to the original image"""
+        if hasattr(self, 'original_image') and self.original_image is not None:
+            # Convert BGR to QPixmap
+            height, width, channel = self.original_image.shape
+            bytes_per_line = 3 * width
+            q_img = QImage(self.original_image.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
+            pixmap = QPixmap.fromImage(q_img)
+            
+            # Display the original image
+            self.image_label.setPixmap(pixmap.scaled(
+                self.image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+            
+            # Reset processed image
+            self.processed_image = None
+            
+            # Disable reset button
+            self.reset_image_button.setEnabled(False)
 
     def convert_to_3d(self):
-        """Convert image to 3D with reduced complexity"""
+        """Convert image to 3D with background removal support"""
         if not self.image_path:
             return
             
         try:
-            # Load and process image
-            image = cv2.imread(self.image_path)
+            # Use processed image if available, otherwise use original
+            if hasattr(self, 'processed_image') and self.processed_image is not None:
+                # If BGRA, convert to BGR by dropping alpha channel
+                if self.processed_image.shape[2] == 4:
+                    image = cv2.cvtColor(self.processed_image, cv2.COLOR_BGRA2BGR)
+                else:
+                    image = self.processed_image.copy()
+            else:
+                image = cv2.imread(self.image_path)
+            
             if image is None:
                 raise ValueError("Failed to load image")
                 
@@ -564,6 +877,185 @@ class MainWindow(QMainWindow):
             self.export_button.setEnabled(False)
             print("Warning: Invalid or empty mesh received")
 
+    def remove_background(self):
+        """Remove background from the current image"""
+        if not self.image_path:
+            return
+            
+        # Get the current image
+        if hasattr(self, 'original_image') and self.original_image is not None:
+            image = self.original_image.copy()
+        else:
+            image = cv2.imread(self.image_path)
+            self.original_image = image.copy()
+        
+        if image is None:
+            QMessageBox.warning(
+                self,
+                "Error",
+                "Failed to load image. Please select a different image."
+            )
+            return
+        
+        try:
+            # Get the selected method
+            method_text = self.method_combo.currentText().lower()
+            method_map = {
+                "grabcut": "grabcut",
+                "thresholding": "thresholding",
+                "deep": "deep"
+            }
+            method = method_map.get(method_text, "grabcut")
+            
+            # Remove background
+            self.bg_remover.set_method(method)
+            self.processed_image, self.mask = self.bg_remover.remove_background(image)
+            
+            # Convert BGRA to QPixmap
+            height, width, channel = self.processed_image.shape
+            bytes_per_line = 4 * width
+            q_img = QImage(self.processed_image.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(q_img)
+            
+            # Display the processed image
+            self.image_label.setPixmap(pixmap.scaled(
+                self.image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+            
+            # Enable reset button
+            self.reset_image_button.setEnabled(True)
+            
+        except Exception as e:
+            print(f"Error removing background: {str(e)}")
+            QMessageBox.warning(
+                self,
+                "Error",
+                f"Failed to remove background: {str(e)}"
+            )
+
+    def reset_image(self):
+        """Reset to the original image"""
+        if hasattr(self, 'original_image') and self.original_image is not None:
+            # Convert BGR to QPixmap
+            height, width, channel = self.original_image.shape
+            bytes_per_line = 3 * width
+            q_img = QImage(self.original_image.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
+            pixmap = QPixmap.fromImage(q_img)
+            
+            # Display the original image
+            self.image_label.setPixmap(pixmap.scaled(
+                self.image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+            
+            # Reset processed image
+            self.processed_image = None
+            
+            # Disable reset button
+            self.reset_image_button.setEnabled(False)
+
+    # Modified convert_to_3d function to use the processed image
+    def convert_to_3d_with_bg_removal(self):
+        """Convert image to 3D with background removal support"""
+        if not self.image_path:
+            return
+            
+        try:
+            # Use processed image if available, otherwise use original
+            if hasattr(self, 'processed_image') and self.processed_image is not None:
+                # If BGRA, convert to BGR by dropping alpha channel
+                if self.processed_image.shape[2] == 4:
+                    image = cv2.cvtColor(self.processed_image, cv2.COLOR_BGRA2BGR)
+                else:
+                    image = self.processed_image.copy()
+            else:
+                image = cv2.imread(self.image_path)
+            
+            if image is None:
+                raise ValueError("Failed to load image")
+                
+            # Reduce size more aggressively to prevent rendering issues
+            max_size = 128  # Smaller size for better performance
+            height, width = image.shape[:2]
+            scale = max_size / max(height, width)
+            new_size = (int(width * scale), int(height * scale))
+            image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+            
+            # Start mesh generation
+            self.mesh_thread = EnhancedMeshGenerator(image)
+            self.mesh_thread.finished.connect(self.display_mesh)
+            self.mesh_thread.mesh_ready.connect(self.store_mesh)
+            self.mesh_thread.start()
+            
+        except Exception as e:
+            print(f"Error in convert_to_3d: {str(e)}")
+            QMessageBox.critical(
+                self,
+                "Conversion Error",
+                "Failed to process the image. Please try a different image."
+            )
+
+    # Modifications to MainWindow.__init__
+    def init_bg_removal(self):
+        """Initialize background removal feature"""
+        self.bg_remover = BackgroundRemover()
+        self.original_image = None
+        self.processed_image = None
+        self.mask = None
+        
+        # Create button style as property for reuse
+        self.button_style = """
+            QPushButton {
+                background-color: #363636;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #404040;
+            }
+            QPushButton:pressed {
+                background-color: #505050;
+            }
+            QPushButton:disabled {
+                background-color: #2a2a2a;
+                color: #606060;
+            }
+        """
+
+    # Modification to select_image
+    def select_image_with_bg_removal(self):
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Image",
+            "",
+            "Image Files (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if file_name:
+            self.image_path = file_name
+            
+            # Reset processed image
+            self.processed_image = None
+            self.original_image = None
+            
+            # Load and display image
+            pixmap = QPixmap(file_name)
+            self.image_label.setPixmap(pixmap.scaled(
+                self.image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+            
+            # Enable buttons
+            self.convert_button.setEnabled(True)
+            self.remove_bg_button.setEnabled(True)
+            self.reset_image_button.setEnabled(False)
+            
 def main():
     app = QApplication(sys.argv)
     window = MainWindow()
