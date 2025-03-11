@@ -1,5 +1,18 @@
 .venv\Scripts\activate
 
 pip install trimesh PyOpenGL shapely rtree assa
+python3 --version
 
-111
+
+PyQt6
+numpy
+opencv-python
+trimesh
+pillow
+rembg
+pyqtgraph
+
+pip install PyQt6 numpy opencv-python trimesh pillow rembg pyqtgraph
+# On Windows
+python -m venv myenv
+

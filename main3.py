@@ -59,38 +59,66 @@ class EnhancedMeshGenerator(QThread):
         self.real_dimensions = real_dimensions  # (width, height, depth) in mm
 
     def estimate_depth(self, image, contour_mask):
-        """Advanced depth estimation combining multiple techniques"""
+        """Advanced depth estimation combining multiple techniques with improved detail preservation"""
         # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # Edge detection with different thresholds for better detail
+        # Edge detection with multiple thresholds for better detail capture
         edges1 = cv2.Canny(gray, 30, 100)
         edges2 = cv2.Canny(gray, 50, 150)
-        edges = cv2.addWeighted(edges1, 0.5, edges2, 0.5, 0)
+        edges3 = cv2.Canny(gray, 80, 200)  # Higher threshold for stronger edges
         
-        # Calculate structure tensor for depth cues
-        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        structure_tensor = np.sqrt(sobelx**2 + sobely**2)
+        # Combine edges with weighted blending
+        edges = cv2.addWeighted(edges1, 0.4, edges2, 0.3, 0)
+        edges = cv2.addWeighted(edges, 0.7, edges3, 0.3, 0)
+        
+        # Calculate structure tensor for depth cues with increased sensitivity
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=5)  # Larger kernel for better gradient detection
+        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=5)
+        sobelxy = cv2.Sobel(gray, cv2.CV_64F, 1, 1, ksize=3)  # Diagonal gradients
+        
+        structure_tensor = np.sqrt(sobelx**2 + sobely**2 + sobelxy**2 * 0.5)
         structure_tensor = cv2.normalize(structure_tensor, None, 0, 1, cv2.NORM_MINMAX)
         
-        # Apply distance transform to get depth from shape boundaries
+        # Apply distance transform with improved parameters
         dist_transform = cv2.distanceTransform(contour_mask, cv2.DIST_L2, 5)
         dist_transform = cv2.normalize(dist_transform, None, 0, 1.0, cv2.NORM_MINMAX)
         
-        # Combine all depth cues with weights
+        # Apply Laplacian for additional detail enhancement
+        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        laplacian = np.abs(laplacian)
+        laplacian = cv2.normalize(laplacian, None, 0, 1, cv2.NORM_MINMAX)
+        
+        # Incorporate color information for depth cues (brighter areas often appear closer)
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        _, saturation, value = cv2.split(hsv)
+        value_norm = value.astype(float) / 255
+        
+        # Combine all depth cues with refined weights
         depth_map = (
-            dist_transform * 0.5 +
+            dist_transform * 0.4 +
             structure_tensor * 0.25 +
-            cv2.GaussianBlur(edges.astype(float) / 255, (5, 5), 0) * 0.25
+            cv2.GaussianBlur(edges.astype(float) / 255, (3, 3), 0) * 0.15 +
+            laplacian * 0.1 +
+            value_norm * 0.1
         )
         
-        # Apply adaptive histogram equalization for better detail
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        # Apply multi-scale bilateral filtering for edge-preserving smoothing
+        depth_small = cv2.resize(depth_map, None, fx=0.5, fy=0.5)
+        depth_small = cv2.bilateralFilter(depth_small.astype(np.float32), 7, 50, 50)
+        depth_small = cv2.resize(depth_small, (depth_map.shape[1], depth_map.shape[0]))
+        
+        depth_medium = cv2.bilateralFilter(depth_map.astype(np.float32), 9, 75, 75)
+        
+        # Blend multi-scale filtered results
+        depth_map = depth_small * 0.4 + depth_medium * 0.6
+        
+        # Apply adaptive histogram equalization with improved parameters
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         depth_map = clahe.apply((depth_map * 255).astype(np.uint8)).astype(float) / 255
         
-        # Bilateral filter to preserve edges while smoothing
-        depth_map = cv2.bilateralFilter(depth_map.astype(np.float32), 9, 75, 75)
+        # Final bilateral filter pass
+        depth_map = cv2.bilateralFilter(depth_map.astype(np.float32), 7, 30, 30)
         
         # Apply the depth strength multiplier
         depth_map = depth_map * self.depth_strength
@@ -98,54 +126,440 @@ class EnhancedMeshGenerator(QThread):
         return depth_map
 
     def detect_shape(self, image):
-        """Enhanced shape detection focusing on the main object"""
-        # If image has an alpha channel, use it as mask
+        """Enhanced shape detection with advanced contour processing and noise reduction"""
+        # If image has an alpha channel, use it as mask with refinement
         if image.shape[2] == 4:
             alpha = image[:, :, 3]
-            mask = (alpha > 0).astype(np.uint8) * 255
+            # Apply threshold to alpha channel to clean up semi-transparent areas
+            _, mask = cv2.threshold(alpha, 10, 255, cv2.THRESH_BINARY)
+            
+            # Apply morphological operations to refine the mask
+            kernel = np.ones((3, 3), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            
             return mask
             
         # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # Apply Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        # Apply advanced noise reduction
+        denoised = cv2.fastNlMeansDenoising(gray, None, 20, 7, 21)
         
-        # Apply adaptive thresholding
-        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                    cv2.THRESH_BINARY_INV, 11, 2)
+        # Apply Gaussian blur
+        blurred = cv2.GaussianBlur(denoised, (5, 5), 0)
         
-        # Find contours
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Try multiple thresholding approaches and combine results
+        # 1. Adaptive thresholding
+        adaptive_thresh = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        # 2. Otsu's thresholding
+        _, otsu_thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # 3. Edge-based segmentation
+        edges = cv2.Canny(blurred, 30, 200)
+        kernel = np.ones((5, 5), np.uint8)
+        edges_dilated = cv2.dilate(edges, kernel, iterations=1)
+        
+        # Combine thresholding results
+        combined_thresh = cv2.bitwise_or(adaptive_thresh, otsu_thresh)
+        combined_thresh = cv2.bitwise_or(combined_thresh, edges_dilated)
+        
+        # Find contours on the combined threshold
+        contours, _ = cv2.findContours(combined_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         # Create mask for the shape
         mask = np.zeros_like(gray)
         if contours:
             # Filter contours by area to remove small noise
-            min_area = (gray.shape[0] * gray.shape[1]) * 0.01  # 1% of image area
+            min_area = (gray.shape[0] * gray.shape[1]) * 0.005  # 0.5% of image area (reduced from 1%)
             valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
             
             if valid_contours:
                 # Find the largest contour
                 largest_contour = max(valid_contours, key=cv2.contourArea)
                 
-                # Get convex hull to ensure complete shape
+                # Get convex hull with refinement
                 hull = cv2.convexHull(largest_contour)
                 
-                # Approximate the contour to get better shape detection
-                epsilon = 0.02 * cv2.arcLength(hull, True)
+                # Approximate the contour with adaptive epsilon
+                perimeter = cv2.arcLength(hull, True)
+                epsilon = 0.01 * perimeter  # More precise approximation (reduced from 0.02)
                 approx_contour = cv2.approxPolyDP(hull, epsilon, True)
                 
-                # Create filled mask
+                # Find convexity defects and refine the contour
+                if len(largest_contour) > 3:  # Need at least 4 points for convexity defects
+                    hull_indices = cv2.convexHull(largest_contour, returnPoints=False)
+                    if len(hull_indices) > 2:  # Need at least 3 points for convexity defects
+                        try:
+                            defects = cv2.convexityDefects(largest_contour, hull_indices)
+                            if defects is not None:
+                                # Process significant defects to refine the contour
+                                for i in range(defects.shape[0]):
+                                    _, _, far_idx, distance = defects[i, 0]
+                                    far_point = tuple(largest_contour[far_idx][0])
+                                    # If the defect is significant, include it in the mask
+                                    if distance > 1000:  # Threshold for significant defects
+                                        cv2.circle(mask, far_point, 5, 255, -1)
+                        except:
+                            pass  # Skip if convexity defects calculation fails
+                
+                # Create filled mask from the refined contour
                 cv2.drawContours(mask, [approx_contour], -1, 255, -1)
                 
-                # Apply morphological operations to clean up the mask
-                kernel = np.ones((5,5), np.uint8)
+                # Apply morphological operations for final refinement
+                kernel = np.ones((5, 5), np.uint8)
                 mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+                
+                # Additional processing for smoother edges
+                mask = cv2.GaussianBlur(mask, (5, 5), 0)
+                _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
         
         return mask
-
+    
+    def generate_3d_mesh_with_topology_optimization(self, image):
+        """Generate 3D mesh with improved topology and smoother surfaces"""
+        # Get shape mask with enhanced detection
+        shape_mask = self.detect_shape(image)
+        
+        # Get enhanced depth map
+        depth_map = self.estimate_depth(image, shape_mask)
+        
+        # Apply mask to depth map
+        depth_map = depth_map * (shape_mask > 0).astype(float)
+        
+        # Enhanced smoothing of the depth map for better 3D appearance
+        # Use guided filter which preserves edges better than bilateral filter
+        if shape_mask.any():
+            # Create a guidance image from the original for better edge preservation
+            guide = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            depth_map = cv2.ximgproc.guidedFilter(guide, depth_map, 5, 0.01)
+        
+        # Create vertices only for the masked region
+        height, width = depth_map.shape
+        y, x = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+        
+        # Scale factors to convert to real dimensions if provided
+        if self.real_dimensions:
+            real_width, real_height, real_depth = self.real_dimensions
+            scale_x = real_width / width
+            scale_y = real_height / height
+            scale_z = real_depth
+        else:
+            # Default scaling
+            scale_x = 1.0 / max(width, height)
+            scale_y = 1.0 / max(width, height)
+            scale_z = self.extrusion_depth
+            
+        # Initialize vertices array
+        vertices = []
+        faces = []
+        colors = []
+        vertex_map = np.full((height, width), -1)  # Map to track vertex indices
+        current_vertex = 0
+        
+        # Progress tracking
+        total_pixels = height * width
+        processed_pixels = 0
+        last_percent = 0
+        
+        # Generate front face vertices only for masked region
+        front_vertices_indices = {}
+        for i in range(height):
+            for j in range(width):
+                processed_pixels += 1
+                
+                # Emit progress updates
+                percent_complete = int((processed_pixels / total_pixels) * 50)  # Front face is 50% of work
+                if percent_complete > last_percent:
+                    self.progress.emit(percent_complete)
+                    last_percent = percent_complete
+                
+                if shape_mask[i, j] > 0:
+                    # Get depth value scaled by strength factor
+                    z_value = depth_map[i, j] * scale_z
+                    
+                    # Create vertex with real dimensions
+                    vertices.append([
+                        (j - width/2) * scale_x,
+                        (i - height/2) * scale_y,
+                        z_value
+                    ])
+                    
+                    vertex_map[i, j] = current_vertex
+                    front_vertices_indices[(i, j)] = current_vertex
+                    current_vertex += 1
+        
+        # Generate faces for front surface with improved topology
+        # Use smaller quad cells to better capture details
+        for i in range(height-1):
+            for j in range(width-1):
+                if (shape_mask[i,j] > 0 and shape_mask[i+1,j] > 0 and 
+                    shape_mask[i,j+1] > 0 and shape_mask[i+1,j+1] > 0):
+                    # Get vertex indices
+                    v1 = vertex_map[i,j]
+                    v2 = vertex_map[i,j+1]
+                    v3 = vertex_map[i+1,j]
+                    v4 = vertex_map[i+1,j+1]
+                    
+                    if all(v != -1 for v in [v1, v2, v3, v4]):
+                        # Calculate which diagonal to use for better triangulation
+                        # Compare depth values to create a more natural surface
+                        z1 = depth_map[i, j]
+                        z2 = depth_map[i, j+1]
+                        z3 = depth_map[i+1, j]
+                        z4 = depth_map[i+1, j+1]
+                        
+                        # Choose the diagonal that connects similar heights
+                        # This creates a more natural surface topology
+                        diag1_diff = abs(z1 - z4)
+                        diag2_diff = abs(z2 - z3)
+                        
+                        if diag1_diff <= diag2_diff:
+                            # Use diagonal v1-v4
+                            faces.extend([[v1, v2, v4], [v1, v4, v3]])
+                        else:
+                            # Use diagonal v2-v3
+                            faces.extend([[v1, v2, v3], [v2, v4, v3]])
+                        
+                        # Calculate color based on image with enhanced depth effect
+                        base_color = image[i,j][:3] / 255.0  # Use only RGB channels
+                        depth_factor = depth_map[i,j]
+                        
+                        # Enhanced color depth effect
+                        ambient = 0.3  # Ambient light factor
+                        diffuse = 0.7  # Diffuse light factor
+                        color = base_color * (ambient + diffuse * depth_factor)
+                        
+                        # Add the two triangle colors
+                        colors.extend([color, color])
+        
+        # If add_base is true, create a solid 3D object with improved side and back faces
+        if self.add_base:
+            # First, find the boundary pixels of the shape mask using contour detection
+            # This creates a cleaner boundary than pixel-by-pixel checking
+            contours, _ = cv2.findContours(shape_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            boundary_points = []
+            if contours and len(contours[0]) > 2:
+                # Get the largest contour
+                largest_contour = max(contours, key=cv2.contourArea)
+                
+                # Simplify the contour to reduce complexity while maintaining shape
+                epsilon = 0.005 * cv2.arcLength(largest_contour, True)
+                approx_contour = cv2.approxPolyDP(largest_contour, epsilon, True)
+                
+                # Convert contour points to (i,j) coordinates
+                for point in approx_contour:
+                    j, i = point[0]  # x,y to column,row
+                    if 0 <= i < height and 0 <= j < width:
+                        boundary_points.append((i, j))
+            
+            # If no contour was found, fall back to pixel-based boundary detection
+            if not boundary_points:
+                # Use a more efficient method to find boundary points
+                kernel = np.ones((3, 3), np.uint8)
+                eroded = cv2.erode(shape_mask, kernel, iterations=1)
+                boundary = shape_mask - eroded
+                
+                boundary_indices = np.where(boundary > 0)
+                boundary_points = list(zip(boundary_indices[0], boundary_indices[1]))
+                
+                # Limit the number of boundary points for efficiency
+                if len(boundary_points) > 500:
+                    step = len(boundary_points) // 500
+                    boundary_points = boundary_points[::step]
+            
+            # Sort boundary points to form a loop
+            if boundary_points:
+                # Create back face vertices (flat with slight curvature for better appearance)
+                back_vertices_indices = {}
+                base_z = -0.1 * scale_z  # Small offset for the base
+                
+                # Set a concave base for better stability
+                base_center_z = -0.12 * scale_z
+                
+                total_boundary = len(boundary_points)
+                for idx, (i, j) in enumerate(boundary_points):
+                    # Calculate distance from center for base curvature
+                    center_i, center_j = height // 2, width // 2
+                    dist_from_center = np.sqrt(((i - center_i) / height) ** 2 + ((j - center_j) / width) ** 2)
+                    # Create slight curvature in the base (concave)
+                    back_z = base_z + (base_center_z - base_z) * (1 - dist_from_center) ** 2
+                    
+                    # Add back vertices
+                    vertices.append([
+                        (j - width/2) * scale_x,
+                        (i - height/2) * scale_y,
+                        back_z
+                    ])
+                    back_vertices_indices[(i, j)] = current_vertex
+                    
+                    # Add corresponding front vertex to create side faces
+                    if (i, j) in front_vertices_indices:
+                        front_idx = front_vertices_indices[(i, j)]
+                        back_idx = current_vertex
+                        
+                        # Find next boundary point
+                        next_idx = (idx + 1) % total_boundary
+                        next_i, next_j = boundary_points[next_idx]
+                        
+                        if (next_i, next_j) in front_vertices_indices:
+                            next_front_idx = front_vertices_indices[(next_i, next_j)]
+                            next_back_idx = back_vertices_indices.get((next_i, next_j))
+                            
+                            if next_back_idx is None:
+                                # Calculate back z value for next point
+                                next_dist = np.sqrt(((next_i - center_i) / height) ** 2 + 
+                                                ((next_j - center_j) / width) ** 2)
+                                next_back_z = base_z + (base_center_z - base_z) * (1 - next_dist) ** 2
+                                
+                                # Add the back vertex for the next point
+                                vertices.append([
+                                    (next_j - width/2) * scale_x,
+                                    (next_i - height/2) * scale_y,
+                                    next_back_z
+                                ])
+                                next_back_idx = current_vertex + 1
+                                back_vertices_indices[(next_i, next_j)] = next_back_idx
+                                current_vertex += 1
+                            
+                            # Create side faces with improved orientation for better rendering
+                            # Check the winding order to ensure correct face normals
+                            faces.append([front_idx, next_front_idx, back_idx])
+                            faces.append([next_front_idx, next_back_idx, back_idx])
+                            
+                            # Use a gradient color for sides based on the front face color
+                            front_color = image[i,j][:3] / 255.0
+                            side_color_top = front_color * 0.9  # Slightly darker than front
+                            side_color_bottom = front_color * 0.6  # Darker for bottom
+                            
+                            colors.append(side_color_top)  # Top triangle
+                            colors.append(side_color_bottom)  # Bottom triangle
+                    
+                    current_vertex += 1
+                    
+                    # Update progress
+                    percent_complete = 50 + int((idx / total_boundary) * 40)  # Sides are 40% of work
+                    if percent_complete > last_percent:
+                        self.progress.emit(percent_complete)
+                        last_percent = percent_complete
+                
+                # Create back face triangulation with improved method
+                # Use a constrained Delaunay triangulation for a better base surface
+                if len(back_vertices_indices) > 3:
+                    # Get all back face vertices and indices
+                    back_points = np.array([[j, i] for (i, j) in back_vertices_indices.keys()])
+                    back_indices = list(back_vertices_indices.values())
+                    
+                    # Create a concave base centroid
+                    centroid_i = np.mean(back_points[:, 1])
+                    centroid_j = np.mean(back_points[:, 0])
+                    center_dist = 0  # At centroid
+                    centroid_z = base_z + (base_center_z - base_z) * (1 - center_dist) ** 2
+                    
+                    vertices.append([
+                        (centroid_j - width/2) * scale_x,
+                        (centroid_i - height/2) * scale_y,
+                        centroid_z
+                    ])
+                    centroid_idx = current_vertex
+                    current_vertex += 1
+                    
+                    # Create fan triangulation from centroid
+                    for i in range(len(back_indices)):
+                        v1 = back_indices[i]
+                        v2 = back_indices[(i + 1) % len(back_indices)]
+                        
+                        # Check that we're not creating degenerate triangles
+                        if v1 != v2 and v1 != centroid_idx and v2 != centroid_idx:
+                            faces.append([centroid_idx, v1, v2])
+                            
+                            # Dark color for back face with slight variation for better visualization
+                            darkness = 0.3 + 0.05 * np.random.random()  # Slight random variation
+                            back_color = np.array([darkness, darkness, darkness * 1.1])  # Slightly blue tint
+                            colors.append(back_color)
+            
+            # Final progress update
+            self.progress.emit(100)
+        
+        # Convert to numpy arrays with proper types
+        vertices = np.array(vertices, dtype=np.float32)
+        faces = np.array(faces, dtype=np.uint32)
+        colors = np.array(colors, dtype=np.float32)
+        
+        if len(faces) > 0:
+            # Create mesh with proper data types
+            mesh = trimesh.Trimesh(
+                vertices=vertices,
+                faces=faces,
+                face_colors=(colors * 255).astype(np.uint8)
+            )
+            
+            # Mesh cleanup and optimization with enhanced parameters
+            mesh.remove_degenerate_faces()
+            mesh.remove_duplicate_faces()
+            mesh.remove_unreferenced_vertices()
+            
+            # Fix face winding order for consistent normals
+            mesh.fix_normals()
+            
+            # Optional mesh smoothing for better appearance
+            # Use Laplacian smoothing with a small lambda value to preserve details
+            vertices_smoothed = mesh.vertices.copy()
+            
+            # Simple Laplacian smoothing implementation
+            if len(mesh.vertices) > 0 and len(mesh.faces) > 0:
+                adjacency = trimesh.graph.face_adjacency(mesh.faces)
+                for _ in range(2):  # Two iterations of smoothing
+                    for i in range(len(vertices_smoothed)):
+                        # Find connected vertices
+                        connected = []
+                        for face in mesh.faces:
+                            if i in face:
+                                connected.extend([v for v in face if v != i])
+                        
+                        if connected:
+                            # Remove duplicates
+                            connected = list(set(connected))
+                            # Calculate centroid of connected vertices
+                            centroid = np.mean([vertices_smoothed[j] for j in connected], axis=0)
+                            # Move vertex slightly toward centroid (lambda = 0.1)
+                            vertices_smoothed[i] = vertices_smoothed[i] * 0.9 + centroid * 0.1
+            
+                # Update mesh with smoothed vertices
+                # Only apply if the smoothing didn't create issues
+                if not np.any(np.isnan(vertices_smoothed)):
+                    mesh.vertices = vertices_smoothed
+            
+            # Center the mesh at origin
+            mesh.vertices -= mesh.center_mass
+            
+            return mesh, mesh.vertices, mesh.faces, np.array(colors)
+        else:
+            return None, vertices, np.array([], dtype=np.uint32), np.array([], dtype=np.float32)
+    def run(self):
+        try:
+            # Use the improved 3D mesh generation method
+            mesh, vertices, faces, colors = self.generate_3d_mesh_with_topology_optimization(self.image)
+            
+            if mesh is not None:
+                self.mesh_ready.emit(mesh)
+                self.finished.emit(vertices, faces, colors)
+            else:
+                # Create an empty mesh if generation failed
+                empty_mesh = trimesh.Trimesh()
+                self.mesh_ready.emit(empty_mesh)
+                self.finished.emit(np.array([]), np.array([]), np.array([]))
+        except Exception as e:
+            print(f"Error generating mesh: {str(e)}")
+            # Create an empty mesh for error cases
+            empty_mesh = trimesh.Trimesh()
+            self.mesh_ready.emit(empty_mesh)
+            self.finished.emit(np.array([]), np.array([]), np.array([]))
     def generate_enhanced_mesh(self, image):
         """Generate 3D mesh with real dimensions and solid base option"""
         # Detect shape and create mask
