@@ -13,20 +13,12 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 import pyqtgraph.opengl as gl
 
 class RembgBackgroundRemover:
-    """Background removal using the rembg library"""
     
     def __init__(self):
         pass
     
     def remove_background(self, image):
-        """Remove background using rembg
-
-        Args:
-            image: OpenCV image in BGR format
-            
-        Returns:
-            tuple: (image with transparent background in BGRA format, binary mask)
-        """
+        
         # Convert OpenCV image (BGR) to PIL Image (RGB)
         img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(img_rgb)
@@ -50,175 +42,343 @@ class EnhancedMeshGenerator(QThread):
     mesh_ready = pyqtSignal(trimesh.Trimesh)
     progress = pyqtSignal(int)
 
-    def __init__(self, image, depth_strength=1.0, extrusion_depth=0.5, add_base=True, real_dimensions=None):
+    def __init__(self, image, depth_strength=1.0, extrusion_depth=0.5, add_base=True, invert_depth=True, real_dimensions=None):
         super().__init__()
         self.image = image
         self.depth_strength = depth_strength
         self.extrusion_depth = extrusion_depth
         self.add_base = add_base
+        self.invert_depth = invert_depth  # New parameter to control depth inversion
         self.real_dimensions = real_dimensions  # (width, height, depth) in mm
 
-    def estimate_depth(self, image, contour_mask):
-        """Advanced depth estimation combining multiple techniques with improved detail preservation"""
+    def estimate_depth(self, image, contour_mask, invert_depth=True):
+        """Advanced depth estimation with option for inverted or regular depth"""
         # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # Edge detection with multiple thresholds for better detail capture
+        # Ensure proper data types
+        gray = gray.astype(np.uint8)
+        contour_mask = contour_mask.astype(np.uint8)
+        
+        # Edge detection with multiple thresholds
         edges1 = cv2.Canny(gray, 30, 100)
         edges2 = cv2.Canny(gray, 50, 150)
-        edges3 = cv2.Canny(gray, 80, 200)  # Higher threshold for stronger edges
         
         # Combine edges with weighted blending
-        edges = cv2.addWeighted(edges1, 0.4, edges2, 0.3, 0)
-        edges = cv2.addWeighted(edges, 0.7, edges3, 0.3, 0)
+        edges = cv2.addWeighted(edges1, 0.4, edges2, 0.6, 0)
         
-        # Calculate structure tensor for depth cues with increased sensitivity
-        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=5)  # Larger kernel for better gradient detection
-        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=5)
-        sobelxy = cv2.Sobel(gray, cv2.CV_64F, 1, 1, ksize=3)  # Diagonal gradients
+        # Calculate structure tensor for depth cues
+        sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
         
-        structure_tensor = np.sqrt(sobelx**2 + sobely**2 + sobelxy**2 * 0.5)
+        structure_tensor = np.sqrt(sobelx**2 + sobely**2)
         structure_tensor = cv2.normalize(structure_tensor, None, 0, 1, cv2.NORM_MINMAX)
         
-        # Apply distance transform with improved parameters
-        dist_transform = cv2.distanceTransform(contour_mask, cv2.DIST_L2, 5)
+        # Apply distance transform (low weight)
+        dist_transform = cv2.distanceTransform(contour_mask, cv2.DIST_L2, 3)
         dist_transform = cv2.normalize(dist_transform, None, 0, 1.0, cv2.NORM_MINMAX)
         
-        # Apply Laplacian for additional detail enhancement
-        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        # Intensity-based depth - this will be affected by the inversion option
+        intensity_depth = gray.astype(np.float32) / 255.0
+        
+        # Apply inversion based on user choice
+        if invert_depth:
+            # Invert to make dark areas pop up (higher)
+            intensity_depth = 1.0 - intensity_depth
+        # In non-inverted mode, bright areas will be higher
+        
+        intensity_depth = cv2.normalize(intensity_depth, None, 0, 1.0, cv2.NORM_MINMAX)
+        
+        # Enhanced texture detection
+        # This captures local variations in the image texture
+        texture_kernel = np.ones((5, 5), np.float32) / 25
+        local_mean = cv2.filter2D(gray.astype(np.float32), -1, texture_kernel)
+        texture_detail = np.abs(gray.astype(np.float32) - local_mean)
+        texture_detail = cv2.normalize(texture_detail, None, 0, 1, cv2.NORM_MINMAX)
+        
+        # Apply Laplacian for fine detail enhancement
+        # This helps bring out fine details in the image
+        laplacian = cv2.Laplacian(gray, cv2.CV_32F, ksize=1)
         laplacian = np.abs(laplacian)
         laplacian = cv2.normalize(laplacian, None, 0, 1, cv2.NORM_MINMAX)
         
-        # Incorporate color information for depth cues (brighter areas often appear closer)
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        _, saturation, value = cv2.split(hsv)
-        value_norm = value.astype(float) / 255
+        # Extract internal details using multiple approaches
+        # 1. Local contrast variation (enhances texture details)
+        local_contrast = cv2.bilateralFilter(gray, 9, 75, 75).astype(np.float32)
+        local_contrast = np.abs(local_contrast - gray.astype(np.float32)) / 255.0
+        local_contrast = cv2.normalize(local_contrast, None, 0, 1, cv2.NORM_MINMAX)
         
-        # Combine all depth cues with refined weights
+        # 2. High-pass filter to extract fine details
+        blurred = cv2.GaussianBlur(gray.astype(np.float32), (15, 15), 0)
+        high_pass = np.abs(gray.astype(np.float32) - blurred) / 255.0
+        high_pass = cv2.normalize(high_pass, None, 0, 1, cv2.NORM_MINMAX)
+        
+        # 3. Use color information to capture detail that might be lost in grayscale
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        hue, saturation, value = cv2.split(hsv)
+        saturation = saturation.astype(np.float32) / 255.0
+        
+        # Combine all depth cues with weights that emphasize internal details
         depth_map = (
-            dist_transform * 0.4 +
-            structure_tensor * 0.25 +
-            cv2.GaussianBlur(edges.astype(float) / 255, (3, 3), 0) * 0.15 +
-            laplacian * 0.1 +
-            value_norm * 0.1
+            intensity_depth * 0.35 +  # Major contributor - makes dark/light areas pop up based on inversion
+            texture_detail * 0.20 +   # Enhances texture variations
+            high_pass * 0.15 +        # Emphasizes fine details
+            local_contrast * 0.15 +   # Adds local contrast variations
+            laplacian * 0.10 +        # Adds edge detail
+            saturation * 0.05         # Uses color information
         )
         
-        # Apply multi-scale bilateral filtering for edge-preserving smoothing
-        depth_small = cv2.resize(depth_map, None, fx=0.5, fy=0.5)
-        depth_small = cv2.bilateralFilter(depth_small.astype(np.float32), 7, 50, 50)
-        depth_small = cv2.resize(depth_small, (depth_map.shape[1], depth_map.shape[0]))
+        # Subtract edge influence to make the outlines less prominent
+        edge_influence = cv2.dilate(edges.astype(np.float32) / 255.0, np.ones((3, 3), np.uint8))
+        edge_influence = cv2.GaussianBlur(edge_influence, (5, 5), 0)
+        edge_influence = cv2.normalize(edge_influence, None, 0, 0.3, cv2.NORM_MINMAX)  # Reduced strength
         
-        depth_medium = cv2.bilateralFilter(depth_map.astype(np.float32), 9, 75, 75)
+        # Subtract edge influence from the depth map (lowers the borders)
+        depth_map = cv2.normalize(depth_map - edge_influence * 0.5, None, 0, 1, cv2.NORM_MINMAX)
         
-        # Blend multi-scale filtered results
-        depth_map = depth_small * 0.4 + depth_medium * 0.6
+        # Apply smoothing while preserving details
+        try:
+            # Create detail layer
+            detail_layer = depth_map - cv2.GaussianBlur(depth_map, (7, 7), 0)
+            detail_layer = cv2.normalize(detail_layer, None, 0, 0.2, cv2.NORM_MINMAX)
+            
+            # Apply bilateral filter to preserve edges
+            smoothed = cv2.bilateralFilter(depth_map, 7, 50, 50)
+            
+            # Combine smoothed base with enhanced details
+            depth_map = smoothed + detail_layer
+            depth_map = cv2.normalize(depth_map, None, 0, 1, cv2.NORM_MINMAX)
+        except Exception as e:
+            print(f"Filtering error (non-critical): {str(e)}")
+            # Fallback to simple smoothing
+            depth_map = cv2.GaussianBlur(depth_map, (3, 3), 0)
         
-        # Apply adaptive histogram equalization with improved parameters
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        depth_map = clahe.apply((depth_map * 255).astype(np.uint8)).astype(float) / 255
+        # Apply adaptive histogram equalization for better contrast
+        try:
+            depth_uint8 = (depth_map * 255).astype(np.uint8)
+            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            depth_map = clahe.apply(depth_uint8).astype(np.float32) / 255
+        except Exception as e:
+            print(f"CLAHE error (non-critical): {str(e)}")
         
-        # Final bilateral filter pass
-        depth_map = cv2.bilateralFilter(depth_map.astype(np.float32), 7, 30, 30)
+        # Remove mountain-like features but preserve intentional height variations
+        try:
+            depth_map = self.detect_and_remove_mountains(depth_map, contour_mask)
+        except Exception as e:
+            print(f"Mountain removal error (non-critical): {str(e)}")
         
         # Apply the depth strength multiplier
         depth_map = depth_map * self.depth_strength
         
         return depth_map
 
+    def detect_and_remove_mountains(self, depth_map, shape_mask):
+       
+        # Ensure proper data types to prevent OpenCV errors
+        depth_map = depth_map.astype(np.float32)
+        shape_mask = shape_mask.astype(np.uint8)
+        
+        # Only process areas in the shape mask
+        masked_depth = depth_map * (shape_mask > 0).astype(np.float32)
+        
+        # Calculate local max values using dilation
+        kernel_size = 11  # Adjust based on the size of mountains to detect
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        
+        # Normalize depth for dilation (prevent OpenCV errors)
+        depth_norm = (masked_depth * 255).astype(np.uint8)
+        dilated = cv2.dilate(depth_norm, kernel)
+        
+        # Find local maxima (where dilated == original)
+        local_max = (np.abs(dilated - depth_norm) < 3) & (depth_norm > 0)
+        local_max = local_max.astype(np.uint8) * 255
+        
+        # Calculate gradients with proper formats
+        # Convert to 8-bit for gradient calculation to avoid OpenCV errors
+        depth_8bit = (masked_depth * 255).astype(np.uint8)
+        gradient_x = cv2.Sobel(depth_8bit, cv2.CV_32F, 1, 0, ksize=3)
+        gradient_y = cv2.Sobel(depth_8bit, cv2.CV_32F, 0, 1, ksize=3)
+        
+        # Calculate gradient magnitude
+        gradient_mag = np.sqrt(gradient_x**2 + gradient_y**2)
+        
+        # Find areas with large gradients
+        # Use a fixed threshold instead of percentile to avoid potential errors
+        gradient_threshold = 100.0  # Adjust as needed
+        steep_areas = gradient_mag > gradient_threshold
+        
+        # Convert to proper format
+        steep_areas = steep_areas.astype(np.uint8)
+        
+        # Identify potential mountain regions
+        # A mountain is a local maximum with steep areas nearby
+        kernel = np.ones((kernel_size*2, kernel_size*2), np.uint8)
+        steep_areas_dilated = cv2.dilate(steep_areas, kernel)
+        
+        # Mountains are local maxima with steep areas nearby
+        mountain_mask = (local_max > 0) & (steep_areas_dilated > 0)
+        
+        # Optionally, cluster nearby mountain points
+        mountain_mask = mountain_mask.astype(np.uint8) * 255
+        mountain_mask = cv2.dilate(mountain_mask, np.ones((5, 5), np.uint8))
+        
+        # For each detected mountain, flatten the area
+        if np.any(mountain_mask):
+            try:
+                # Find connected components (mountain regions)
+                num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mountain_mask)
+                
+                # Process each mountain region
+                for i in range(1, num_labels):  # Skip label 0 (background)
+                    # Get the region of this mountain
+                    mountain_region = (labels == i)
+                    
+                    # Find the boundary of the mountain region
+                    kernel = np.ones((3, 3), np.uint8)
+                    eroded = cv2.erode(mountain_region.astype(np.uint8), kernel)
+                    boundary = mountain_region & ~(eroded.astype(bool))
+                    
+                    if np.any(boundary):
+                        # Get the average height at the boundary
+                        boundary_heights = masked_depth[boundary]
+                        if len(boundary_heights) > 0:
+                            avg_boundary_height = np.mean(boundary_heights)
+                            
+                            # Flatten the mountain region to this height
+                            # This effectively removes the peak while maintaining the base
+                            masked_depth[mountain_region] = avg_boundary_height
+            except Exception as e:
+                print(f"Mountain detection error (non-critical): {str(e)}")
+                # Continue with the original depth map if there's an error
+                pass
+        
+        # Apply a gaussian blur to smooth the modified areas
+        masked_depth = cv2.GaussianBlur(masked_depth, (5, 5), 0)
+        
+        return masked_depth
+
     def detect_shape(self, image):
-        """Enhanced shape detection with advanced contour processing and noise reduction"""
-        # If image has an alpha channel, use it as mask with refinement
+        """Enhanced shape detection optimized for images with alpha channel"""
+        # Special handling for images with alpha channel
         if image.shape[2] == 4:
+            # Extract alpha channel
             alpha = image[:, :, 3]
-            # Apply threshold to alpha channel to clean up semi-transparent areas
-            _, mask = cv2.threshold(alpha, 10, 255, cv2.THRESH_BINARY)
             
-            # Apply morphological operations to refine the mask
-            kernel = np.ones((3, 3), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            # Multi-threshold approach for better edge definition
+            # 1. Strong threshold for definite object parts
+            _, mask_strong = cv2.threshold(alpha, 200, 255, cv2.THRESH_BINARY)
+            
+            # 2. Medium threshold for semi-transparent areas that should be included
+            _, mask_medium = cv2.threshold(alpha, 30, 255, cv2.THRESH_BINARY)
+            
+            # 3. Adaptive threshold to handle varying transparency levels
+            adaptive_thresh = cv2.adaptiveThreshold(
+                alpha, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY, 11, -2  # Negative constant to be more inclusive
+            )
+            
+            # Combine masks with priority to the stronger signals
+            # Start with adaptive for maximum coverage
+            combined_mask = adaptive_thresh.copy()
+            # Medium threshold overrides where it's set
+            combined_mask = cv2.bitwise_or(combined_mask, mask_medium)
+            # Strong threshold has final say
+            combined_mask = cv2.bitwise_or(combined_mask, mask_strong)
+            
+            # Clean up the mask with morphological operations
+            kernel_small = np.ones((3, 3), np.uint8)
+            kernel_medium = np.ones((5, 5), np.uint8)
+            
+            # Close small holes first (connect nearby components)
+            mask_closed = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_small, iterations=2)
+            
+            # Fill any remaining internal holes using contour filling
+            contours, _ = cv2.findContours(mask_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            mask_filled = np.zeros_like(mask_closed)
+            
+            if contours:
+                # Keep only significant contours (filter out tiny noise)
+                min_area = (alpha.shape[0] * alpha.shape[1]) * 0.001  # 0.1% of image area
+                valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
+                
+                # Draw all valid contours filled
+                cv2.drawContours(mask_filled, valid_contours, -1, 255, -1)
+                
+                # Optional: Perform one more closing to ensure smooth boundaries
+                mask_filled = cv2.morphologyEx(mask_filled, cv2.MORPH_CLOSE, kernel_medium)
+                
+                # Dilate slightly to ensure we capture all of the object's edges
+                mask_filled = cv2.dilate(mask_filled, kernel_small, iterations=1)
+                
+                return mask_filled
+            
+            # If no valid contours found, return the closed mask
+            return mask_closed
+        
+        # For non-alpha images, use the existing shape detection method
+        else:
+            # Convert to grayscale
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Apply advanced noise reduction
+            denoised = cv2.fastNlMeansDenoising(gray, None, 20, 7, 21)
+            
+            # Apply Gaussian blur
+            blurred = cv2.GaussianBlur(denoised, (5, 5), 0)
+            
+            # Try multiple thresholding approaches and combine results
+            # 1. Adaptive thresholding
+            adaptive_thresh = cv2.adaptiveThreshold(
+                blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY_INV, 11, 2
+            )
+            
+            # 2. Otsu's thresholding
+            _, otsu_thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            
+            # 3. Edge-based segmentation
+            edges = cv2.Canny(blurred, 30, 200)
+            kernel = np.ones((5, 5), np.uint8)
+            edges_dilated = cv2.dilate(edges, kernel, iterations=1)
+            
+            # Combine thresholding results
+            combined_thresh = cv2.bitwise_or(adaptive_thresh, otsu_thresh)
+            combined_thresh = cv2.bitwise_or(combined_thresh, edges_dilated)
+            
+            # Find contours on the combined threshold
+            contours, _ = cv2.findContours(combined_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Create mask for the shape
+            mask = np.zeros_like(gray)
+            if contours:
+                # Filter contours by area to remove small noise
+                min_area = (gray.shape[0] * gray.shape[1]) * 0.005
+                valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
+                
+                if valid_contours:
+                    # Find the largest contour
+                    largest_contour = max(valid_contours, key=cv2.contourArea)
+                    
+                    # Get convex hull with refinement
+                    hull = cv2.convexHull(largest_contour)
+                    
+                    # Approximate the contour with adaptive epsilon
+                    perimeter = cv2.arcLength(hull, True)
+                    epsilon = 0.01 * perimeter
+                    approx_contour = cv2.approxPolyDP(hull, epsilon, True)
+                    
+                    # Create filled mask from the refined contour
+                    cv2.drawContours(mask, [approx_contour], -1, 255, -1)
+                    
+                    # Apply morphological operations for final refinement
+                    kernel = np.ones((5, 5), np.uint8)
+                    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+                    
+                    # Additional processing for smoother edges
+                    mask = cv2.GaussianBlur(mask, (5, 5), 0)
+                    _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
             
             return mask
-            
-        # Convert to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # Apply advanced noise reduction
-        denoised = cv2.fastNlMeansDenoising(gray, None, 20, 7, 21)
-        
-        # Apply Gaussian blur
-        blurred = cv2.GaussianBlur(denoised, (5, 5), 0)
-        
-        # Try multiple thresholding approaches and combine results
-        # 1. Adaptive thresholding
-        adaptive_thresh = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY_INV, 11, 2
-        )
-        
-        # 2. Otsu's thresholding
-        _, otsu_thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        # 3. Edge-based segmentation
-        edges = cv2.Canny(blurred, 30, 200)
-        kernel = np.ones((5, 5), np.uint8)
-        edges_dilated = cv2.dilate(edges, kernel, iterations=1)
-        
-        # Combine thresholding results
-        combined_thresh = cv2.bitwise_or(adaptive_thresh, otsu_thresh)
-        combined_thresh = cv2.bitwise_or(combined_thresh, edges_dilated)
-        
-        # Find contours on the combined threshold
-        contours, _ = cv2.findContours(combined_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Create mask for the shape
-        mask = np.zeros_like(gray)
-        if contours:
-            # Filter contours by area to remove small noise
-            min_area = (gray.shape[0] * gray.shape[1]) * 0.005  # 0.5% of image area (reduced from 1%)
-            valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
-            
-            if valid_contours:
-                # Find the largest contour
-                largest_contour = max(valid_contours, key=cv2.contourArea)
-                
-                # Get convex hull with refinement
-                hull = cv2.convexHull(largest_contour)
-                
-                # Approximate the contour with adaptive epsilon
-                perimeter = cv2.arcLength(hull, True)
-                epsilon = 0.01 * perimeter  # More precise approximation (reduced from 0.02)
-                approx_contour = cv2.approxPolyDP(hull, epsilon, True)
-                
-                # Find convexity defects and refine the contour
-                if len(largest_contour) > 3:  # Need at least 4 points for convexity defects
-                    hull_indices = cv2.convexHull(largest_contour, returnPoints=False)
-                    if len(hull_indices) > 2:  # Need at least 3 points for convexity defects
-                        try:
-                            defects = cv2.convexityDefects(largest_contour, hull_indices)
-                            if defects is not None:
-                                # Process significant defects to refine the contour
-                                for i in range(defects.shape[0]):
-                                    _, _, far_idx, distance = defects[i, 0]
-                                    far_point = tuple(largest_contour[far_idx][0])
-                                    # If the defect is significant, include it in the mask
-                                    if distance > 1000:  # Threshold for significant defects
-                                        cv2.circle(mask, far_point, 5, 255, -1)
-                        except:
-                            pass  # Skip if convexity defects calculation fails
-                
-                # Create filled mask from the refined contour
-                cv2.drawContours(mask, [approx_contour], -1, 255, -1)
-                
-                # Apply morphological operations for final refinement
-                kernel = np.ones((5, 5), np.uint8)
-                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-                
-                # Additional processing for smoother edges
-                mask = cv2.GaussianBlur(mask, (5, 5), 0)
-                _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
-        
-        return mask
     
     def generate_3d_mesh_with_topology_optimization(self, image):
         """Generate 3D mesh with improved topology and smoother surfaces"""
@@ -226,8 +386,8 @@ class EnhancedMeshGenerator(QThread):
         shape_mask = self.detect_shape(image)
         
         # Get enhanced depth map
-        depth_map = self.estimate_depth(image, shape_mask)
-        
+        depth_map = self.estimate_depth(image, shape_mask, self.invert_depth)
+
         # Apply mask to depth map
         depth_map = depth_map * (shape_mask > 0).astype(float)
         
@@ -566,7 +726,7 @@ class EnhancedMeshGenerator(QThread):
         shape_mask = self.detect_shape(image)
         
         # Get enhanced depth map using the shape mask
-        depth_map = self.estimate_depth(image, shape_mask)
+        depth_map = self.estimate_depth(image, shape_mask, self.invert_depth)
         
         # Apply mask to depth map
         depth_map = depth_map * (shape_mask > 0).astype(float)
@@ -794,7 +954,7 @@ class EnhancedMeshGenerator(QThread):
             self.finished.emit(np.array([]), np.array([]), np.array([]))
 
 class RemoveBackgroundThread(QThread):
-    """Thread for removing background using rembg"""
+    """Thread for removing background"""
     finished = pyqtSignal(np.ndarray, np.ndarray)
     error = pyqtSignal(str)
     
@@ -813,7 +973,7 @@ class RemoveBackgroundThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Enhanced 3D Object Generator")
+        self.setWindowTitle("OneUp:Converting 2D Images Into 3D Model Through Digital Image Processing")
         self.setGeometry(100, 100, 1300, 800)
         self.setMinimumSize(1200, 700)
         self.setStyleSheet("""
@@ -917,7 +1077,7 @@ class MainWindow(QMainWindow):
 
     def add_background_removal_ui(self):
         # Background removal group
-        bg_removal_group = QGroupBox("Background Removal (rembg)")
+        bg_removal_group = QGroupBox("Background Removal")
         bg_removal_group.setStyleSheet("""
             QGroupBox {
                 font-weight: bold;
@@ -1000,6 +1160,15 @@ class MainWindow(QMainWindow):
         self.add_base_checkbox = QCheckBox("Create Solid 3D Object")
         self.add_base_checkbox.setChecked(True)
         
+        # NEW: Add invert depth checkbox
+        self.invert_depth_checkbox = QCheckBox("Invert Depth")
+        self.invert_depth_checkbox.setChecked(True)  # Default to inverted depth
+        self.invert_depth_checkbox.setToolTip("When checked, dark areas will be raised. When unchecked, light areas will be raised.")
+        
+        # Create a helper text label
+        self.invert_depth_label = QLabel("• Checked: Text and details pop up\n• Unchecked: Outlines and borders pop up")
+        self.invert_depth_label.setStyleSheet("color: #999999; font-size: 10px; margin-left: 25px;")
+        
         # Add real dimensions options
         dimensions_layout = QHBoxLayout()
         
@@ -1037,6 +1206,8 @@ class MainWindow(QMainWindow):
         settings_layout.addRow("Depth Strength:", self.depth_slider)
         settings_layout.addRow("Extrusion Depth:", self.extrusion_slider)
         settings_layout.addRow("", self.add_base_checkbox)
+        settings_layout.addRow("", self.invert_depth_checkbox)
+        settings_layout.addRow("", self.invert_depth_label)
         settings_layout.addRow("", self.use_real_dims_checkbox)
         settings_layout.addRow("Dimensions:", dimensions_layout)
         
@@ -1296,7 +1467,7 @@ class MainWindow(QMainWindow):
         self.remove_bg_button.setText("🎭 Remove Background")  # Reset text
 
     def remove_background(self):
-        """Remove background using rembg"""
+        """Remove background using"""
         if not self.image_path:
             return
         
@@ -1360,9 +1531,8 @@ class MainWindow(QMainWindow):
         try:
             # Use processed image if available, otherwise use original
             if hasattr(self, 'processed_image') and self.processed_image is not None:
-                # If BGRA, convert to BGR by dropping alpha channel
+                # If BGRA, keep alpha channel for better shape detection
                 if self.processed_image.shape[2] == 4:
-                    # Keep alpha channel for better shape detection
                     image = self.processed_image.copy()
                 else:
                     image = self.processed_image.copy()
@@ -1381,6 +1551,7 @@ class MainWindow(QMainWindow):
             depth_strength = self.depth_slider.value() / 100.0
             extrusion_depth = self.extrusion_slider.value() / 100.0
             add_base = self.add_base_checkbox.isChecked()
+            invert_depth = self.invert_depth_checkbox.isChecked()  # Get the invert depth setting
             
             # Check if using real dimensions
             if self.use_real_dims_checkbox.isChecked():
@@ -1392,19 +1563,20 @@ class MainWindow(QMainWindow):
             else:
                 real_dimensions = None
             
-            # Downscale for better performance, but not as aggressively as before
+            # Downscale for better performance
             max_size = 256  # Larger size for better detail
             height, width = image.shape[:2]
             scale = max_size / max(height, width)
             new_size = (int(width * scale), int(height * scale))
             image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
             
-            # Start mesh generation with settings
+            # Start mesh generation with settings including invert_depth option
             self.mesh_thread = EnhancedMeshGenerator(
                 image, 
                 depth_strength=depth_strength,
                 extrusion_depth=extrusion_depth,
                 add_base=add_base,
+                invert_depth=invert_depth,  # Pass the invert depth setting
                 real_dimensions=real_dimensions
             )
             
@@ -1424,7 +1596,10 @@ class MainWindow(QMainWindow):
             self.convert_button.setText("🔄 Generate 3D Model")
 
     def display_mesh(self, vertices, faces, colors):
-        """Display the 3D mesh with enhanced rendering"""
+        """Display the 3D mesh with enhanced rendering and proper centering"""
+        # Import QtGui for QVector3D
+        from PyQt6 import QtGui
+        
         self.viewer.clear()
         
         try:
@@ -1437,6 +1612,12 @@ class MainWindow(QMainWindow):
                 vertices = np.array(vertices, dtype=np.float32)
                 faces = np.array(faces, dtype=np.uint32)
                 
+                # Calculate the center of the mesh
+                center = np.mean(vertices, axis=0)
+                
+                # Center the vertices by subtracting the center point
+                centered_vertices = vertices - center
+                
                 # Create colors if missing
                 if len(colors) != len(faces) or colors.shape[1] != 3:
                     colors = np.ones((len(faces), 4), dtype=np.float32) * [0.7, 0.7, 0.7, 1.0]
@@ -1445,9 +1626,9 @@ class MainWindow(QMainWindow):
                     alpha = np.ones((len(colors), 1), dtype=np.float32)
                     colors = np.hstack([colors, alpha]).astype(np.float32)
 
-                # Create mesh with enhanced parameters
+                # Create mesh with enhanced parameters and centered vertices
                 self.mesh_item = gl.GLMeshItem(
-                    vertexes=vertices,
+                    vertexes=centered_vertices,
                     faces=faces,
                     faceColors=colors,
                     smooth=True,  # Enable smooth shading
@@ -1461,8 +1642,8 @@ class MainWindow(QMainWindow):
                 grid.setSize(x=2, y=2, z=0.1)
                 grid.setSpacing(x=0.1, y=0.1, z=0.1)
                 
-                # Adjust grid position
-                min_z = vertices[:, 2].min()
+                # Adjust grid position to be below the mesh
+                min_z = centered_vertices[:, 2].min()
                 grid.translate(0, 0, min_z - 0.1)
                 
                 # Add axis for reference
@@ -1477,14 +1658,21 @@ class MainWindow(QMainWindow):
                 self.viewer.addItem(z_axis)
                 self.viewer.addItem(self.mesh_item)
                 
-                # Set camera position
-                self.viewer.setCameraPosition(distance=3.0, elevation=30, azimuth=45)
+                # Determine appropriate camera distance based on mesh size
+                mesh_size = np.max(np.ptp(centered_vertices, axis=0))
+                camera_distance = max(3.0, mesh_size * 1.5)  # Ensure minimum distance of 3.0
+                
+                # Set camera position with appropriate distance
+                self.viewer.setCameraPosition(distance=camera_distance, elevation=30, azimuth=45)
                 
                 # Set rendering options
-                self.viewer.opts['distance'] = 3.0
+                self.viewer.opts['distance'] = camera_distance
                 self.viewer.opts['fov'] = 60
                 self.viewer.opts['elevation'] = 30
                 self.viewer.opts['azimuth'] = 45
+                
+                # Reset camera target to origin (0,0,0) where mesh is now centered
+                self.viewer.opts['center'] = QtGui.QVector3D(0, 0, 0)
                 
                 # Update view
                 self.viewer.update()

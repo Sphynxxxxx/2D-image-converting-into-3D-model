@@ -1,5 +1,10 @@
-.venv\Scripts\activate
+---------------------------------
+python3 -m venv myenv
 
+myenv\Scripts\activate (activate this before installing library)
+
+then install the remaining library
+---------------------------------
 pip install trimesh PyOpenGL shapely rtree assa
 python3 --version
 
