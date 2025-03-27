@@ -5,6 +5,8 @@ import trimesh
 from PIL import Image
 from rembg import remove
 import io
+import importlib.util
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QPushButton, QLabel, QFileDialog, QMessageBox, QGroupBox, QComboBox,
                            QSlider, QDoubleSpinBox, QFormLayout, QCheckBox, QProgressBar)

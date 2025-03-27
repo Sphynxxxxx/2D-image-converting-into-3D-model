@@ -21,3 +21,13 @@ pip install PyQt6 numpy opencv-python trimesh pillow rembg pyqtgraph
 # On Windows
 python -m venv myenv
 
+mesh_item
+
+mesh_item = gl.GLMeshItem(
+            vertexes=vertices,
+            faces=faces,
+            faceColors=colors,
+            smooth=False,
+            drawEdges=True,
+            edgeColor=(0, 0, 0, 1)
+        )
