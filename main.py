@@ -17,10 +17,28 @@ class Shape3DConverter:
         self.circle_segments = 72  # Segments for circle approximation
         self.sphere_segments = 64  # Segments for sphere generation
         self.true_3d_mode = False  # Default to extrusion mode
+        self.heart_3d_mode = False  # Special mode for 3D hearts
         self.vertex_radius = 0.0   # Default vertex radius (0 means no vertices shown)
-        self.smooth_heart = True  # Heart smoothing option
+        self.smooth_heart = True  # Heart smoothing option - still keeping the property with default value
         self.smoothing_factor = 0.0  # Initialize smoothing factor
+        self.inflation_enabled = False  # New property for inflation mode
+        self.inflation_factor = 0.5  # Default inflation factor (0.0 to 1.0)
+        self.inflation_distribution = 0.0
+        self.extrusion_strength = 1.0  # Default extrusion strength multiplier
+
+
+    def set_extrusion_strength(self, strength):
+        """Set the extrusion strength multiplier (0.1 to 3.0)"""
+        self.extrusion_strength = max(0.1, min(3.0, strength))
+
+    def set_inflation_enabled(self, enabled):
+        """Enable or disable shape inflation mode"""
+        self.inflation_enabled = enabled
         
+    def set_inflation_factor(self, factor):
+        """Set inflation factor (0.0 to 1.0)"""
+        self.inflation_factor = max(0.0, min(1.0, factor))
+
     def set_smoothing_factor(self, factor):
         """Set edge smoothing factor (0.0 to 1.0)"""
         self.smoothing_factor = factor
@@ -28,14 +46,18 @@ class Shape3DConverter:
     def set_true_3d_mode(self, enabled):
         """Enable or disable true 3D mode"""
         self.true_3d_mode = enabled
+        if enabled:
+            self.heart_3d_mode = False
+        
+    def set_heart_3d_mode(self, enabled):
+        """Enable or disable specialized heart 3D mode"""
+        self.heart_3d_mode = enabled
+        if enabled:
+            self.true_3d_mode = False
         
     def set_vertex_radius(self, radius):
         """Set the radius of vertices in the mesh"""
         self.vertex_radius = radius
-        
-    def set_smooth_heart(self, enabled):
-        """Enable or disable smooth heart mode"""
-        self.smooth_heart = enabled
 
     def remove_background(self, image):
         """Remove background using rembg"""
@@ -46,6 +68,142 @@ class Shape3DConverter:
         bgra = cv2.cvtColor(output_array, cv2.COLOR_RGBA2BGRA)
         mask = (bgra[:, :, 3] > 0).astype(np.uint8) * 255
         return bgra, mask
+
+    def inflate_mesh(self, vertices, faces, colors):
+        """
+        Create a balloon-like inflated version of a mesh with uniform distribution
+        and protection for center points
+        """
+        if not vertices or not faces or len(vertices) < 3:
+            return vertices, faces, colors
+        
+        try:
+            vertices = np.array(vertices, dtype=np.float32)
+            faces = np.array(faces, dtype=np.int32)
+            
+            # Create a trimesh object
+            temp_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+            
+            # Identify center vertices (vertices connected to many faces)
+            vertex_face_count = np.zeros(len(vertices), dtype=np.int32)
+            for face in faces:
+                for vertex in face:
+                    vertex_face_count[vertex] += 1
+                    
+            # Centers typically have many more connections
+            center_indices = np.where(vertex_face_count > np.mean(vertex_face_count) * 1.5)[0]
+            
+            # Store original heights of center vertices
+            center_heights = {}
+            for idx in center_indices:
+                center_heights[idx] = vertices[idx, 2]
+            
+            # Calculate mesh properties for scaling
+            mesh_size = np.max(np.ptp(vertices, axis=0))
+            inflation_distance = mesh_size * 0.8 * self.inflation_factor
+            
+            # Get vertex normals
+            vertex_normals = temp_mesh.vertex_normals
+            
+            # Calculate centroid of the mesh
+            centroid = np.mean(vertices, axis=0)
+            
+            # 1. Center-based inflation but with more uniform distribution
+            vectors_from_center = vertices - centroid
+            distances_from_center = np.linalg.norm(vectors_from_center, axis=1)
+            max_distance = np.max(distances_from_center)
+            
+            # Normalize distances
+            normalized_distances = distances_from_center / max_distance
+            
+            # Use different scaling strategies based on inflation_distribution setting
+            if self.inflation_distribution > 0:
+                # More inflation at center
+                power = 2.0 - self.inflation_distribution
+                scale_factors = 1.0 + inflation_distance * (1.0 - normalized_distances ** power)
+            elif self.inflation_distribution < 0:
+                # More inflation at edges
+                power = 2.0 + abs(self.inflation_distribution)
+                scale_factors = 1.0 + inflation_distance * normalized_distances ** power
+            else:
+                # Uniform inflation
+                scale_factors = 1.0 + inflation_distance * 0.5 * (1.0 + normalized_distances)
+            
+            # Apply center-based scaling with more uniformity
+            inflated_vertices = centroid + vectors_from_center * scale_factors[:, np.newaxis]
+            
+            # 2. Normal-based smoothing (rounds out the shape)
+            # Apply normal-based inflation more uniformly
+            normal_strength = inflation_distance * 0.3
+            inflated_vertices += vertex_normals * normal_strength
+            
+            # Apply Laplacian smoothing for a more even surface
+            smooth_mesh = trimesh.Trimesh(vertices=inflated_vertices, faces=faces)
+            trimesh.smoothing.filter_laplacian(smooth_mesh, iterations=4)
+            inflated_vertices = smooth_mesh.vertices
+            
+            # Restore original heights for center vertices
+            for idx, height in center_heights.items():
+                # Adjust center vertex height while maintaining some inflation effect
+                # (we don't want to completely flatten it)
+                current_height = inflated_vertices[idx, 2]
+                # Keep 80% of the original height plus 20% of the inflated height
+                inflated_vertices[idx, 2] = height * 0.8 + current_height * 0.2
+            
+            return inflated_vertices.tolist(), faces.tolist(), colors
+            
+        except Exception as e:
+            print(f"Inflation error: {e}")
+            import traceback
+            traceback.print_exc()
+            return vertices, faces, colors
+        
+    def taubin_smooth_mesh(self, mesh, iterations=5):
+        """Apply Taubin smoothing to mesh for better quality than Laplacian smoothing
+        
+        Taubin smoothing prevents shrinkage by using alternating positive and negative smoothing factors
+        """
+        try:
+            # Make a copy to avoid modifying original
+            smoothed = mesh.copy()
+            
+            # Smoothing parameters
+            lamb = 0.5    # Positive smoothing factor
+            mu = -0.53    # Negative smoothing factor
+            
+            # Get vertex neighbors from mesh
+            new_vertices = np.array(smoothed.vertices, dtype=np.float64)
+            adjacency = smoothed.vertex_neighbors
+            
+            # Apply multiple iterations of smoothing
+            for _ in range(iterations):
+                # First pass (inflation)
+                offsets = np.zeros_like(new_vertices)
+                for i, neighbors in enumerate(adjacency):
+                    if neighbors:
+                        neighbor_verts = new_vertices[neighbors]
+                        average = np.mean(neighbor_verts, axis=0)
+                        offsets[i] = lamb * (average - new_vertices[i])
+                new_vertices += offsets
+                
+                # Second pass (anti-inflation)
+                offsets = np.zeros_like(new_vertices)
+                for i, neighbors in enumerate(adjacency):
+                    if neighbors:
+                        neighbor_verts = new_vertices[neighbors]
+                        average = np.mean(neighbor_verts, axis=0)
+                        offsets[i] = mu * (average - new_vertices[i])
+                new_vertices += offsets
+                
+            # Update mesh vertices
+            smoothed.vertices = new_vertices
+            return smoothed
+            
+        except Exception as e:
+            print(f"Taubin smoothing failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return mesh
 
     def get_contour_color(self, contour, image):
         """Get the dominant color within a contour with improved accuracy"""
@@ -216,7 +374,7 @@ class Shape3DConverter:
                                     continue
                     
                     # Improved Heart detection
-                    if self.is_heart_shape(contour):
+                    if self.is_heart_shape(contour, image):
                         shapes.append(('heart', contour.squeeze(), color))
                         continue
                     
@@ -266,8 +424,8 @@ class Shape3DConverter:
         
         return shapes
 
-    def is_heart_shape(self, contour):
-        """Improved heart shape detection with multiple verification methods"""
+    def is_heart_shape(self, contour, image):
+        """Improved heart shape detection with better tolerance and recognition"""
         try:
             # Basic shape checks
             if len(contour) < 10:  # Need enough points to analyze
@@ -275,19 +433,22 @@ class Shape3DConverter:
                 
             # Get basic shape properties
             area = cv2.contourArea(contour)
+            if area < 200:  # Ignore very small contours
+                return False
+                
             perimeter = cv2.arcLength(contour, True)
             
             # Circularity check (hearts are less circular than circles)
             circularity = 4 * math.pi * area / (perimeter ** 2)
-            if circularity > 0.85:  # Too circular to be a heart
+            if circularity > 0.9:  # Slightly more tolerant (was 0.85)
                 return False
                 
             # Get bounding rect and aspect ratio
             x, y, w, h = cv2.boundingRect(contour)
             aspect_ratio = w / float(h)
             
-            # Heart typically has aspect ratio between 0.7 and 1.4
-            if aspect_ratio < 0.7 or aspect_ratio > 1.4:
+            # Heart typically has aspect ratio between 0.65 and 1.5 (more tolerant range)
+            if aspect_ratio < 0.65 or aspect_ratio > 1.5:
                 return False
                 
             # Get extreme points
@@ -300,13 +461,17 @@ class Shape3DConverter:
             width = extreme_right[0] - extreme_left[0]
             height = extreme_bottom[1] - extreme_top[1]
             
-            # Check symmetry - compare left and right halves
+            # Check center of mass (heart shape tends to have center of mass in upper half)
             moments = cv2.moments(contour)
             if moments["m00"] == 0:
                 return False
                 
             cx = int(moments["m10"] / moments["m00"])
             cy = int(moments["m01"] / moments["m00"])
+            
+            # Heart's center of mass should be above the geometric center
+            if cy > y + (h * 0.6):  # More tolerant
+                return False
             
             # Split contour into left and right parts relative to center
             left_points = [pt[0] for pt in contour if pt[0][0] < cx]
@@ -315,30 +480,16 @@ class Shape3DConverter:
             if len(left_points) < 3 or len(right_points) < 3:
                 return False
                 
-            # Flip right points to compare with left
+            # Flip right points to compare with left (check symmetry)
             right_points_flipped = [(2*cx - x, y) for (x, y) in right_points]
             
             # Calculate similarity between left and flipped right
             similarity = self.contour_similarity(np.array(left_points), np.array(right_points_flipped))
-            if similarity < 0.7:  # Not symmetric enough
+            if similarity < 0.65:  # More tolerant (was 0.7)
                 return False
                 
-            # Check for characteristic heart features
-            # 1. Should have a dip at the top (between lobes)
-            top_region_height = int(h * 0.3)
-            top_region = [pt for pt in contour if pt[0][1] < (y + top_region_height)]
-            
-            if len(top_region) > 0:
-                # Find the lowest point in the top region (the dip between lobes)
-                dip_point = max(top_region, key=lambda pt: pt[0][1])
-                dip_y = dip_point[0][1]
-                
-                # The dip should be below the top but above the middle
-                if not (y < dip_y < (y + h * 0.4)):
-                    return False
-                    
-            # 2. Should have a point at the bottom
-            bottom_region_height = int(h * 0.2)
+            # IMPROVED: Check for bottom point (heart should have a point at the bottom)
+            bottom_region_height = int(h * 0.3)  # Increased from 0.2
             bottom_region = [pt for pt in contour if pt[0][1] > (y + h - bottom_region_height)]
             
             if len(bottom_region) > 0:
@@ -346,42 +497,84 @@ class Shape3DConverter:
                 tip_point = max(bottom_region, key=lambda pt: pt[0][1])
                 tip_x, tip_y = tip_point[0]
                 
-                # The tip should be near the vertical center
-                if abs(tip_x - cx) > (w * 0.2):
+                # The tip should be near the vertical center (more tolerant)
+                if abs(tip_x - cx) > (w * 0.3):  # Increased from 0.2
                     return False
+            
+            # IMPROVED: Check for top dip (between lobes)
+            # Use a more focused top region
+            top_region_height = int(h * 0.4)  # Increased from 0.3
+            top_region = [pt for pt in contour if pt[0][1] < (y + top_region_height)]
+            
+            if len(top_region) > 5:  # Ensure we have enough points
+                # Find leftmost and rightmost points in top region
+                left_top = min(top_region, key=lambda pt: pt[0][0])
+                right_top = max(top_region, key=lambda pt: pt[0][0])
+                
+                # Check if we have points between these that are lower (indicating a dip)
+                middle_x = (left_top[0][0] + right_top[0][0]) / 2
+                middle_width = (right_top[0][0] - left_top[0][0]) * 0.4  # Check middle 40%
+                
+                middle_points = [pt for pt in top_region if 
+                                abs(pt[0][0] - middle_x) < middle_width]
+                
+                if middle_points:
+                    lowest_middle = max(middle_points, key=lambda pt: pt[0][1])
                     
-            # 3. Check curvature features
-            curvature = self.calculate_curvature(contour)
+                    # Check if middle dip is lower than the sides (allowing for hand-drawn imperfections)
+                    left_top_y = left_top[0][1]
+                    right_top_y = right_top[0][1]
+                    avg_top_y = (left_top_y + right_top_y) / 2
+                    
+                    # If the dip isn't lower, this might not be a heart
+                    if lowest_middle[0][1] < avg_top_y - 5:  # Allow slight variance
+                        # No dip found, but don't immediately reject
+                        # Just give this test less weight if other tests pass
+                        pass
             
-            # Should have positive curvature at top (lobes) and negative at bottom (point)
-            top_curvature = [c for pt, c in zip(contour, curvature) if pt[0][1] < (y + h * 0.3)]
-            bottom_curvature = [c for pt, c in zip(contour, curvature) if pt[0][1] > (y + h * 0.7)]
-            
-            if len(top_curvature) == 0 or len(bottom_curvature) == 0:
-                return False
-                
-            avg_top_curvature = np.mean(top_curvature)
-            avg_bottom_curvature = np.mean(bottom_curvature)
-            
-            # Top should be convex (positive curvature), bottom concave (negative)
-            if avg_top_curvature < 0 or avg_bottom_curvature > 0:
-                return False
-                
-            # Additional check using convex hull defects
+            # NEW: Check for convexity defects (heart shape has specific defects)
             hull = cv2.convexHull(contour, returnPoints=False)
-            defects = cv2.convexityDefects(contour, hull)
-            
-            if defects is not None:
-                # Hearts typically have 2 significant defects (between lobes and at point)
-                significant_defects = sum(1 for i in range(defects.shape[0]) 
-                                    if defects[i,0,3]/256.0 > 10)  # Minimum depth
+            if len(hull) > 2:  # Need at least 3 points for convexity defects
+                defects = cv2.convexityDefects(contour, hull)
                 
-                if significant_defects not in (2, 3):  # Usually 2 (lobes and point), sometimes 3
-                    return False
+                if defects is not None:
+                    # Count significant defects - hearts typically have 1-3
+                    significant_defects = 0
+                    for i in range(defects.shape[0]):
+                        depth = defects[i,0,3] / 256.0
+                        if depth > 5:  # More tolerant threshold
+                            significant_defects += 1
                     
-            # If all checks passed, it's probably a heart
-            return True
+                    # Allow a wider range of defects (more tolerant for hand-drawn hearts)
+                    if significant_defects < 1 or significant_defects > 5:
+                        return False
             
+            # NEW: Check vertical distribution of area
+            # Hearts have more area in the top than the bottom
+            top_half_mask = np.zeros(image.shape[:2], dtype=np.uint8)  # Changed from self.original_image to image
+            bottom_half_mask = np.zeros(image.shape[:2], dtype=np.uint8)  # Changed from self.original_image to image
+            
+            # Define top and bottom halves
+            cv2.drawContours(top_half_mask, [contour], 0, 255, -1)
+            cv2.drawContours(bottom_half_mask, [contour], 0, 255, -1)
+            
+            # Crop to respective halves
+            mid_y = y + h/2
+            top_half_mask[int(mid_y):, :] = 0  # Clear bottom part
+            bottom_half_mask[:int(mid_y), :] = 0  # Clear top part
+            
+            # Calculate areas
+            top_area = cv2.countNonZero(top_half_mask)
+            bottom_area = cv2.countNonZero(bottom_half_mask)
+            
+            # In hearts, top area is typically larger than bottom
+            if top_area <= bottom_area:
+                # Not an immediate rejection, but a strong indicator
+                pass  # Keep checking other criteria
+                
+            # If we've made it here, it's probably a heart
+            return True
+                
         except Exception as e:
             print(f"Heart detection error: {e}")
             return False
@@ -667,6 +860,10 @@ class Shape3DConverter:
             faces.append([1, 5, 2])
             faces.append([2, 5, 6])
             
+            ## Right face
+            faces.append([1, 5, 2])
+            faces.append([2, 5, 6])
+            
             # Back face
             faces.append([2, 6, 3])
             faces.append([3, 6, 7])
@@ -691,7 +888,7 @@ class Shape3DConverter:
         
         cx, cy = center
         
-        if not self.true_3d_mode:
+        if not self.true_3d_mode and not self.heart_3d_mode:
             # Standard circle extrusion
             # Front face
             front_start = 0
@@ -708,7 +905,7 @@ class Shape3DConverter:
                 angle = 2 * math.pi * i / self.circle_segments
                 vertices.append([cx + radius * math.cos(angle), 
                                 cy + radius * math.sin(angle), 
-                                height])
+                                height * self.extrusion_strength])
                 colors.append(color)
             
             # Front center
@@ -732,7 +929,7 @@ class Shape3DConverter:
                 next_i = (i+1)%self.circle_segments
                 faces.append([i, next_i, back_start+next_i])
                 faces.append([i, back_start+next_i, back_start+i])
-        else:
+        elif self.true_3d_mode:
             # Create a sphere
             # Generate sphere vertices and faces using UV sphere method
             for phi_idx in range(self.sphere_segments):
@@ -766,174 +963,141 @@ class Shape3DConverter:
                         faces.append([curr1, curr2, next2])
                     if phi_idx < self.sphere_segments - 2:  # Skip the bottom pole triangles
                         faces.append([curr1, next2, next1])
+        else:  # heart_3d_mode
+            # Create a decorative heart shape
+            # We'll generate a heart-shaped mesh directly using parametric equations
+            horizontal_segments = 84 # More segments for even smoother shape
+            vertical_segments = 64    # More vertical detail
+
+            # Generate parametric heart
+            for v_idx in range(vertical_segments + 1):
+                v = v_idx / vertical_segments
+                for h_idx in range(horizontal_segments): 
+                    u = 2 * math.pi * h_idx / horizontal_segments
+                    
+                    # Use a heart-shaped function (cardioid-based)
+                    # Modified version of the parametric heart formula
+                    cos_u = math.cos(u)
+                    sin_u = math.sin(u)
+                    
+                    # Create heart shape with x^2 + (y - x^(2/3))^2 = 1
+                    # We adapt it to 3D using spherical coordinates
+                    x = radius * (
+                        16 * math.sin(u) ** 3 * math.sin(v * math.pi)
+                    ) / 16
+                    
+                    y = radius * (
+                        (13 * math.cos(u) - 5 * math.cos(2*u) - 2 * math.cos(3*u) - math.cos(4*u)) * math.sin(v * math.pi)
+                    ) / 16
+                    
+                    z = radius * math.cos(v * math.pi) * 0.8  # Scale z-dimension
+                    
+                    # Offset to center position
+                    vertices.append([cx + x, cy + y, z * height])
+                    colors.append(color)
+            
+            # Generate faces connecting vertices
+            for v_idx in range(vertical_segments):
+                for h_idx in range(horizontal_segments):
+                    # Current row indices
+                    curr1 = v_idx * horizontal_segments + h_idx
+                    curr2 = v_idx * horizontal_segments + (h_idx + 1) % horizontal_segments
+                    
+                    # Next row indices
+                    next1 = (v_idx + 1) * horizontal_segments + h_idx
+                    next2 = (v_idx + 1) * horizontal_segments + (h_idx + 1) % horizontal_segments
+                    
+                    # Create faces (two triangles)
+                    faces.append([curr1, curr2, next2])
+                    faces.append([curr1, next2, next1])
                         
         return vertices, faces, colors
 
-    def create_heart_mesh(self, points, height, color):
-        """Create a fully volumetric 3D heart with realistic shape and features"""
-        vertices_3d = []
+    def create_realistic_heart_mesh(self, center, size, height, color):
+        """Create a smooth, balloon-like 3D heart shape."""
+        vertices = []
         faces = []
         colors = []
         
-        try:
-            if len(points) < 5:
-                return vertices_3d, faces, colors
-            
-            points = np.array(points, dtype=np.float32)
-            if np.any(np.isnan(points)) or np.any(np.isinf(points)):
-                return vertices_3d, faces, colors
-            
-            center_x, center_y = np.mean(points[:,0]), np.mean(points[:,1])
-            
-            # Get heart dimensions for reference
-            x_min, y_min = np.min(points, axis=0)
-            x_max, y_max = np.max(points, axis=0)
-            width = x_max - x_min
-            height_2d = y_max - y_min
-            
-            # Calculate max radius for scaling
-            max_dist_from_center = np.max(np.sqrt(np.sum((points - np.array([center_x, center_y]))**2, axis=1)))
-            
-            if not self.true_3d_mode and not self.smooth_heart:
-                # Standard heart extrusion
-                n = len(points)
-                
-                # Front vertices
-                for x, y in points:
-                    vertices_3d.append([x, y, 0])
-                    colors.append(color)
-                
-                # Back vertices
-                back_start = n
-                for x, y in points:
-                    vertices_3d.append([x, y, height])
-                    colors.append(color)
-                
-                # Front center
-                center_front = len(vertices_3d)
-                vertices_3d.append([center_x, center_y, 0])
-                colors.append(color)
-                
-                for i in range(n):
-                    faces.append([center_front, i, (i+1)%n])
-                
-                # Back center
-                center_back = len(vertices_3d)
-                vertices_3d.append([center_x, center_y, height])
-                colors.append(color)
-                
-                for i in range(n):
-                    faces.append([center_back, back_start+(i+1)%n, back_start+i])
-                
-                # Sides
-                for i in range(n):
-                    next_i = (i+1)%n
-                    faces.append([i, next_i, back_start+next_i])
-                    faces.append([i, back_start+next_i, back_start+i])
-            else:
-                # Create a smooth 3D heart with volumetric shape
-                # Use higher resolution for smoother heart
-                horizontal_segments = 48  # More segments for even smoother shape
-                vertical_segments = 32    # More vertical detail
-                
-                # Scale depth based on slider - amplify effect
-                depth_scale = height * 2.5
-                
-                # Generate parametric heart
-                for v_idx in range(vertical_segments + 1):
-                    # Map v from 0 (top) to 1 (bottom)
-                    v = v_idx / vertical_segments
-                    phi = v * math.pi  # Map to 0-π
-                    
-                    for h_idx in range(horizontal_segments):
-                        # Map u around circumference
-                        u = 2 * math.pi * h_idx / horizontal_segments
-                        
-                        # Basic trig values
-                        sin_phi = math.sin(phi)
-                        cos_phi = math.cos(phi)
-                        sin_u = math.sin(u)
-                        cos_u = math.cos(u)
-                        
-                        # Heart shape modifiers
-                        heart_width_factor = 1.0
-                        heart_depth_factor = 1.0
-                        
-                        # Top half - create pronounced lobes
-                        if phi < math.pi/2:
-                            # Enhanced lobes with stronger effect
-                            lobe_factor = 1.0 + 0.7 * math.sin(2 * u)  # Stronger lobes (0.7)
-                            
-                            # Control lobe intensity based on height
-                            # Maximum effect at top, gradually diminishing
-                            lobe_intensity = (1.0 - phi/(math.pi/2)) * 0.9  # Higher intensity (0.9)
-                            
-                            # Apply width factor
-                            heart_width_factor = 1.0 + lobe_factor * lobe_intensity
-                            
-                            # Adjust depth for top half - thinner at very top, growing fuller
-                            heart_depth_factor = 0.3 + 1.5 * (phi / (math.pi/2))
-                        else:
-                            # Bottom half - create sharper point
-                            # More aggressive tapering for bottom point
-                            point_taper = 1.0 - 0.85 * ((phi - math.pi/2) / (math.pi/2))
-                            heart_width_factor = point_taper
-                            
-                            # Bottom half depth - maintain fullness then taper
-                            heart_depth_factor = 1.8 - 1.6 * ((phi - math.pi/2) / (math.pi/2))
-                        
-                        # Create the valley between lobes
-                        top_indent = 0
-                        if phi < math.pi/3:
-                            # Apply indent at top center (more pronounced)
-                            angle_from_top = abs(u - math.pi) 
-                            if angle_from_top < 0.3 or angle_from_top > (2 * math.pi - 0.3):
-                                indent_strength = 0.35 * (1.0 - phi/(math.pi/3))
-                                top_indent = indent_strength * max(0, (0.3 - angle_from_top)) * 12
-                        
-                        # Apply additional smoothing if smooth heart mode is enabled
-                        if self.smooth_heart:
-                            # Smooth out the edges with a slight expansion
-                            edge_smoothing = 0.1 * math.sin(4 * u) * math.sin(3 * phi)
-                            heart_width_factor += edge_smoothing
-                            
-                            # Smooth the indent between lobes
-                            if phi < math.pi/3:
-                                top_indent *= 0.7  # Reduce the indent depth
-                        
-                        # Final scaling and coordinate calculation
-                        radius_factor = max_dist_from_center * 0.95  # Match original contour
-                        
-                        # Calculate coordinates with all factors applied
-                        x = center_x + radius_factor * heart_width_factor * sin_phi * cos_u
-                        y = center_y + radius_factor * heart_width_factor * sin_phi * sin_u
-                        
-                        # Z calculation with more volume and proper indent
-                        z = depth_scale * heart_depth_factor * cos_phi - top_indent * depth_scale
-                        
-                        vertices_3d.append([x, y, z])
-                        colors.append(color)# Generate faces connecting vertices
-                for phi_idx in range(vertical_segments):
-                    for theta_idx in range(horizontal_segments):
-                        # Current row indices
-                        curr1 = phi_idx * horizontal_segments + theta_idx
-                        curr2 = phi_idx * horizontal_segments + (theta_idx + 1) % horizontal_segments
-                        
-                        # Next row indices
-                        next1 = (phi_idx + 1) * horizontal_segments + theta_idx
-                        next2 = (phi_idx + 1) * horizontal_segments + (theta_idx + 1) % horizontal_segments
-                        
-                        # Create faces (two triangles)
-                        faces.append([curr1, curr2, next2])
-                        faces.append([curr1, next2, next1])
-                    
-        except Exception as e:
-            print(f"Heart mesh error: {e}")
-            import traceback
-            traceback.print_exc()
-            return [], [], []
+        # Extract center coordinates
+        cx, cy = center
         
-        return vertices_3d, faces, colors
+        # Increase segments for smoother appearance
+        horizontal_segments = 84  # Increased from 64
+        vertical_segments = 64    # Increased from 48
+        
+        # Generate parametric heart with smoother curvature
+        for v_idx in range(vertical_segments + 1):
+            v = v_idx / vertical_segments
+            phi = v * math.pi  # Map to 0-π
+            
+            for h_idx in range(horizontal_segments):
+                u = 2 * math.pi * h_idx / horizontal_segments
+                
+                # Basic trig values
+                sin_phi = math.sin(phi)
+                cos_phi = math.cos(phi)
+                sin_u = math.sin(u)
+                cos_u = math.cos(u)
+                
+                # Heart shape modifiers with enhanced balloon-like properties
+                heart_width_factor = 1.0
+                heart_depth_factor = 1.0
+                
+                # Create lobes and bottom point with more pronounced curvature
+                if phi < math.pi / 2:  # Top half (lobes)
+                    # Enhanced lobe shaping for balloon-like appearance
+                    heart_width_factor = 1.0 + 0.6 * sin_u * sin_phi  # Increased from 0.5 to 0.6
+                    heart_depth_factor = 0.6 + 0.5 * cos_phi  # Adjusted for rounder shape
+                else:  # Bottom half
+                    # Enhanced tapering for balloon-like appearance
+                    heart_width_factor = 1.0 - 0.6 * (phi - math.pi / 2) / (math.pi / 2)  # Increased taper
+                    heart_depth_factor = 0.6 * (1.0 - (phi - math.pi / 2) / (math.pi / 2))  # Adjusted depth
+                
+                # Apply additional balloon-like inflation factor
+                balloon_factor = 1.2  # Adjust for desired inflation (values > 1 create more balloon-like shapes)
+                
+                # Calculate coordinates with all factors applied
+                x = cx + size * balloon_factor * heart_width_factor * sin_phi * cos_u
+                y = cy + size * balloon_factor * heart_width_factor * sin_phi * sin_u
+                
+                # Z calculation for depth with enhanced curve
+                z = height * balloon_factor * heart_depth_factor * cos_phi
+                
+                vertices.append([x, y, z])
+                colors.append(color)
+        
+        # Generate faces connecting vertices
+        for phi_idx in range(vertical_segments):
+            for theta_idx in range(horizontal_segments):
+                # Current row indices
+                curr1 = phi_idx * horizontal_segments + theta_idx
+                curr2 = phi_idx * horizontal_segments + (theta_idx + 1) % horizontal_segments
+                
+                # Next row indices
+                next1 = (phi_idx + 1) * horizontal_segments + theta_idx
+                next2 = (phi_idx + 1) * horizontal_segments + (theta_idx + 1) % horizontal_segments
+                
+                # Create faces (two triangles)
+                faces.append([curr1, curr2, next2])
+                faces.append([curr1, next2, next1])
+        
+        return vertices, faces, colors
+    
+    def create_default_heart_shape(self, center, size):
+        """Create a default heart shape with smooth contour"""
+        cx, cy = center
+        points = []
+        
+        # Create a heart shape using parametric equations
+        for i in range(36):
+            angle = 2 * math.pi * i / 36
+            # Heart shape formula
+            x = cx + size * (16 * math.sin(angle) ** 3) / 16
+            y = cy + size * (13 * math.cos(angle) - 5 * math.cos(2*angle) - 2 * math.cos(3*angle) - math.cos(4*angle)) / 16
+            points.append([x, y])
+        
+        return np.array(points)
 
     def create_star_mesh(self, points, height, color):
         """Create a 3D star/sun extrusion or a 3D star with volume"""
@@ -952,7 +1116,7 @@ class Shape3DConverter:
             center_x, center_y = np.mean(points[:,0]), np.mean(points[:,1])
             n = len(points)
             
-            if not self.true_3d_mode:
+            if not self.true_3d_mode and not self.heart_3d_mode:
                 # Standard extrusion
                 # Front vertices
                 for x, y in points:
@@ -962,7 +1126,7 @@ class Shape3DConverter:
                 # Back vertices
                 back_start = n
                 for x, y in points:
-                    vertices_3d.append([x, y, height])
+                    vertices_3d.append([x, y, height * self.extrusion_strength])
                     colors.append(color)
                 
                 # Front center
@@ -1067,6 +1231,73 @@ class Shape3DConverter:
             return [], [], []
         
         return vertices_3d, faces, colors
+    
+    def create_heart_mesh(self, points, height, color):
+        """Create a 3D heart mesh from contour points or use a parametric heart"""
+        vertices = []
+        faces = []
+        colors = []
+        
+        try:
+            # Calculate center and size from points
+            points = np.array(points, dtype=np.float32)
+            if len(points) < 3 or np.any(np.isnan(points)) or np.any(np.isinf(points)):
+                return vertices, faces, colors
+                
+            # Find the bounding rectangle to determine size and center
+            x_min, y_min = np.min(points, axis=0)
+            x_max, y_max = np.max(points, axis=0)
+            center_x = (x_min + x_max) / 2
+            center_y = (y_min + y_max) / 2
+            size = max(x_max - x_min, y_max - y_min) / 2  # Use half the max dimension as size
+            
+            # If in heart 3D mode, create a parametric heart
+            if self.heart_3d_mode:
+                return self.create_realistic_heart_mesh((center_x, center_y), size, height, color)
+                
+            # Otherwise, use standard extrusion approach
+            n = len(points)
+            
+            # Front face
+            for x, y in points:
+                vertices.append([x, y, 0])
+                colors.append(color)
+            
+            # Back face
+            back_start = n
+            for x, y in points:
+                vertices.append([x, y, height * self.extrusion_strength])
+                colors.append(color)
+            
+            # Front center
+            center_front = len(vertices)
+            vertices.append([center_x, center_y, 0])
+            colors.append(color)
+            
+            for i in range(n):
+                faces.append([center_front, i, (i+1)%n])
+            
+            # Back center
+            center_back = len(vertices)
+            vertices.append([center_x, center_y, height])
+            colors.append(color)
+            
+            for i in range(n):
+                faces.append([center_back, back_start+(i+1)%n, back_start+i])
+            
+            # Sides
+            for i in range(n):
+                next_i = (i+1)%n
+                faces.append([i, next_i, back_start+next_i])
+                faces.append([i, back_start+next_i, back_start+i])
+                
+            return vertices, faces, colors
+            
+        except Exception as e:
+            print(f"Heart mesh creation error: {e}")
+            import traceback
+            traceback.print_exc()
+            return [], [], []
 
     def create_3d_mesh(self, image, shapes, height=1.0):
         """Create 3D mesh from detected shapes with optional vertices"""
@@ -1097,7 +1328,7 @@ class Shape3DConverter:
                 vertices, faces, colors = self.create_fraction_mesh(
                     params, height_px, color
                 )
-            elif shape_type == 'rectangle' and self.true_3d_mode:
+            elif shape_type == 'rectangle' and (self.true_3d_mode or self.heart_3d_mode):
                 vertices, faces, colors = self.create_rectangle_mesh(
                     params, height_px, color
                 )
@@ -1106,6 +1337,10 @@ class Shape3DConverter:
                 vertices, faces, colors = self.create_polygon_mesh(
                     vertices_2d, height_px, color
                 )
+            
+            # Apply inflation if enabled
+            if self.inflation_enabled and vertices and faces:
+                vertices, faces, colors = self.inflate_mesh(vertices, faces, colors)
             
             # Offset face indices for combined mesh
             faces = [[idx + face_offset for idx in face] for face in faces]
@@ -1149,22 +1384,124 @@ class Shape3DConverter:
         return mesh
     
     def smooth_mesh(self, mesh, factor):
-        """Apply Laplacian smoothing to the mesh"""
+        """Apply advanced smoothing to the mesh based on factor strength with center protection"""
         try:
-            # Convert factor from 0-1 to number of iterations (1-10)
-            iterations = max(1, int(factor * 10))
+            # If factor is very small, don't smooth
+            if factor < 0.05:
+                return mesh
+                
+            # Make sure the mesh is valid before smoothing
+            if not mesh.is_watertight:
+                print("Warning: Mesh is not watertight, using simplified smoothing")
+                return self.simple_smooth_mesh(mesh, factor)
+                
+            # Check if mesh has any NaN or Inf values
+            if np.any(np.isnan(mesh.vertices)) or np.any(np.isinf(mesh.vertices)):
+                print("Warning: Mesh contains invalid coordinates, skipping smoothing")
+                return mesh
+                
+            # Find center vertices (by finding vertices that are connected to many faces)
+            # These are typically the center points we want to protect from sinking
+            vertex_face_count = np.zeros(len(mesh.vertices), dtype=np.int32)
+            for face in mesh.faces:
+                for vertex in face:
+                    vertex_face_count[vertex] += 1
+                    
+            # Vertices connected to many faces are likely center vertices
+            # (typically twice or more connections than regular vertices)
+            center_vertices = np.where(vertex_face_count > np.mean(vertex_face_count) * 1.5)[0]
             
-            # Make a copy to avoid modifying original
-            smoothed = mesh.copy()
+            # Store original z-values for center vertices
+            original_centers = {}
+            for idx in center_vertices:
+                original_centers[idx] = mesh.vertices[idx, 2]
             
-            # Apply Laplacian smoothing
-            trimesh.smoothing.filter_laplacian(smoothed, iterations=iterations)
-            
-            return smoothed
+            # Calculate iterations based on factor, but limit for stability
+            iterations = max(1, min(5, int(factor * 10)))
+                
+            try:
+                # Try Taubin smoothing first
+                smoothed = self.taubin_smooth_mesh(mesh, iterations)
+                
+                # Restore center vertices' original z-heights
+                for idx, z_val in original_centers.items():
+                    smoothed.vertices[idx, 2] = z_val
+                    
+                return smoothed
+            except ValueError as e:
+                # If we get a dimension mismatch, fall back to simple smoothing
+                print(f"Taubin smoothing failed with error: {e}")
+                print("Falling back to simple smoothing")
+                return self.simple_smooth_mesh_with_center_protection(mesh, factor, original_centers)
+                
         except Exception as e:
             print(f"Smoothing failed: {e}")
+            import traceback
+            traceback.print_exc()
             return mesh
-        
+    
+    def simple_smooth_mesh_with_center_protection(self, mesh, factor, center_vertices=None):
+        """Apply simple vertex averaging smoothing to the mesh while preserving center height"""
+        try:
+            # Create a copy of the mesh
+            smoothed = mesh.copy()
+            vertices = smoothed.vertices.copy()
+            faces = smoothed.faces
+            
+            # If center vertices weren't provided, try to detect them
+            if center_vertices is None:
+                center_vertices = {}
+                vertex_face_count = np.zeros(len(vertices), dtype=np.int32)
+                for face in faces:
+                    for vertex in face:
+                        vertex_face_count[vertex] += 1
+                        
+                # Find vertices connected to many faces (likely centers)
+                potential_centers = np.where(vertex_face_count > np.mean(vertex_face_count) * 1.5)[0]
+                
+                # Store their original z-values
+                for idx in potential_centers:
+                    center_vertices[idx] = vertices[idx, 2]
+            
+            # Get neighboring vertices for each vertex
+            neighbors = [[] for _ in range(len(vertices))]
+            for face in faces:
+                for i in range(3):
+                    neighbors[face[i]].extend([face[(i+1)%3], face[(i+2)%3]])
+            
+            # Remove duplicates
+            for i in range(len(neighbors)):
+                neighbors[i] = list(set(neighbors[i]))
+            
+            # Apply smoothing
+            strength = min(0.9, factor)  # Limit maximum smoothing
+            new_vertices = vertices.copy()
+            
+            for i in range(len(vertices)):
+                if not neighbors[i]:
+                    continue
+                    
+                # For center vertices, only smooth X and Y, not Z
+                if i in center_vertices:
+                    # Calculate average position of neighbors
+                    avg_pos = np.mean([vertices[n] for n in neighbors[i]], axis=0)
+                    # Only move X and Y coordinates, keep original Z
+                    new_vertices[i][0] = vertices[i][0] * (1 - strength) + avg_pos[0] * strength
+                    new_vertices[i][1] = vertices[i][1] * (1 - strength) + avg_pos[1] * strength
+                    # Keep original Z height
+                    new_vertices[i][2] = center_vertices[i]
+                else:
+                    # For regular vertices, apply normal smoothing
+                    avg_pos = np.mean([vertices[n] for n in neighbors[i]], axis=0)
+                    new_vertices[i] = vertices[i] * (1 - strength) + avg_pos * strength
+            
+            # Update mesh vertices
+            smoothed.vertices = new_vertices
+            return smoothed
+        except Exception as e:
+            print(f"Simple smoothing failed: {e}")
+            return mesh
+
     def simple_smooth_mesh(self, mesh, factor):
         """Apply simple vertex averaging smoothing to the mesh"""
         try:
@@ -1204,6 +1541,7 @@ class Shape3DConverter:
             print(f"Simple smoothing failed: {e}")
             return mesh
 
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1213,8 +1551,9 @@ class MainWindow(QMainWindow):
         self.current_mesh = None
         self.shapes = None  # Store detected shapes
         self.processed_image = None  # Store the current image
-        self.has_hearts = False  # Flag to track if there are hearts detected
-        self.smoothing_factor = 0.0 
+        self.smoothing_factor = 0.0
+        self.inflation_distribution = 0.0  # 0.0 means uniform inflation
+
         self.init_ui()
 
     def init_ui(self):
@@ -1259,35 +1598,31 @@ class MainWindow(QMainWindow):
         # 3D Options group
         options_group = QGroupBox("3D Options")
         options_layout = QVBoxLayout()
-        options_layout = QVBoxLayout()
-
+        
+        # Mode selection (horizontal layout for the checkboxes)
+        mode_widget = QWidget()
+        mode_layout = QHBoxLayout(mode_widget)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
         
         # True 3D mode checkbox
-        self.true_3d_checkbox = QCheckBox("True 3D Mode")
+        self.true_3d_checkbox = QCheckBox("Sphere")
         self.true_3d_checkbox.setToolTip("Convert to volumetric 3D models instead of extrusions")
         self.true_3d_checkbox.stateChanged.connect(self.toggle_true_3d_mode)
         
-        # Smooth heart checkbox
-        self.smooth_heart_checkbox = QCheckBox("Smooth Heart Edges")
-        self.smooth_heart_checkbox.setToolTip("Create hearts with smoother edges and realistic shape")
-        self.smooth_heart_checkbox.setEnabled(False)
-        self.smooth_heart_checkbox.stateChanged.connect(self.toggle_smooth_heart)
-
-        # Smoothing control
-        #smoothing_control = QWidget()
-        #smoothing_layout = QVBoxLayout(smoothing_control)
-        #smoothing_layout.setContentsMargins(0, 0, 0, 0)
-        #
-        #self.smoothing_slider = QSlider(Qt.Orientation.Horizontal)
-        #self.smoothing_slider.setRange(0, 100)
-        #self.smoothing_slider.setValue(0)
-        #self.smoothing_label = QLabel("Edge Smoothing: 0%")
-        #
-        #smoothing_layout.addWidget(QLabel("Edge Smoothing:"))
-        #smoothing_layout.addWidget(self.smoothing_slider)
-        #smoothing_layout.addWidget(self.smoothing_label)
-        #
-        #options_layout.addWidget(smoothing_control)
+        # Heart 3D mode checkbox
+        self.heart_3d_checkbox = QCheckBox("Real Heart")
+        self.heart_3d_checkbox.setToolTip("Create anatomically-inspired 3D hearts")
+        self.heart_3d_checkbox.stateChanged.connect(self.toggle_heart_3d_mode)
+        
+        # Inflation checkbox - create it BEFORE trying to use it
+        self.inflation_checkbox = QCheckBox("Inflate Shapes")
+        self.inflation_checkbox.setToolTip("Create rounded, inflated versions of shapes")
+        self.inflation_checkbox.stateChanged.connect(self.toggle_inflation_mode)
+        
+        mode_layout.addWidget(self.true_3d_checkbox)
+        mode_layout.addWidget(self.heart_3d_checkbox)
+        mode_layout.addWidget(self.inflation_checkbox)
+        options_layout.addWidget(mode_widget)
         
         # Height control
         height_control = QWidget()
@@ -1303,9 +1638,41 @@ class MainWindow(QMainWindow):
         height_layout.addWidget(self.height_slider)
         height_layout.addWidget(self.height_label)
         
-        options_layout.addWidget(self.true_3d_checkbox)
-        options_layout.addWidget(self.smooth_heart_checkbox)
         options_layout.addWidget(height_control)
+        
+        # Inflation slider control - create it BEFORE trying to use it
+        inflation_control = QWidget()
+        inflation_layout = QVBoxLayout(inflation_control)
+        inflation_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.inflation_slider = QSlider(Qt.Orientation.Horizontal)
+        self.inflation_slider.setRange(0, 100)
+        self.inflation_slider.setValue(50)
+        self.inflation_slider.setEnabled(False)  # Initially disabled
+        self.inflation_label = QLabel("Inflation: 50%")
+        
+        inflation_layout.addWidget(QLabel("Inflation Amount:"))
+        inflation_layout.addWidget(self.inflation_slider)
+        inflation_layout.addWidget(self.inflation_label)
+        
+        options_layout.addWidget(inflation_control)
+        
+        # Distribution slider control
+        distribution_control = QWidget()
+        distribution_layout = QVBoxLayout(distribution_control)
+        distribution_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.distribution_slider = QSlider(Qt.Orientation.Horizontal)
+        self.distribution_slider.setRange(0, 100)
+        self.distribution_slider.setValue(50)  # Start at middle point
+        self.distribution_slider.setEnabled(False)  # Initially disabled
+        self.distribution_label = QLabel("Inflation Distribution: 50%")
+        
+        #distribution_layout.addWidget(QLabel("Center vs Edge Inflation:"))
+        #distribution_layout.addWidget(self.distribution_slider)
+        #distribution_layout.addWidget(self.distribution_label)
+        
+        options_layout.addWidget(distribution_control)
         options_group.setLayout(options_layout)
         
         left_layout.addWidget(self.image_label)
@@ -1324,9 +1691,67 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.viewer, 2)
         self.setCentralWidget(main_widget)
         
-        # Connect slider
+        # Connect sliders - do this AFTER creating all widgets
         self.height_slider.valueChanged.connect(self.update_height_and_model)
-        #self.smoothing_slider.valueChanged.connect(self.update_smoothing)
+        self.inflation_slider.valueChanged.connect(self.update_inflation)
+        self.distribution_slider.valueChanged.connect(self.update_distribution)
+        self.inflation_checkbox.stateChanged.connect(lambda state: self.distribution_slider.setEnabled(state == Qt.CheckState.Checked.value))
+
+        #self.smooth_checkbox = QCheckBox("Smooth Surface")
+        #self.smooth_checkbox.setChecked(True)
+        #self.smooth_checkbox.setToolTip("Apply high-quality smoothing to 3D objects")
+        
+        #mode_layout.addWidget(self.smooth_checkbox)
+        
+        # Connect to update function
+        #self.smooth_checkbox.stateChanged.connect(self.toggle_smoothing)
+
+    def toggle_smoothing(self, state):
+        """Toggle smoothing on/off"""
+        is_enabled = state == Qt.CheckState.Checked.value
+        
+        # Update smoothing factor based on checkbox
+        self.smoothing_factor = 0.5 if is_enabled else 0.0
+        self.converter.set_smoothing_factor(self.smoothing_factor)
+        
+        # Update the model if shapes are already detected
+        if self.shapes:
+            self.update_3d_model()
+
+
+    def set_inflation_distribution(self, factor):
+        """Set inflation distribution factor (-1.0 to 1.0)
+        Negative values focus inflation at edges
+        Positive values focus inflation at center
+        Zero creates uniform inflation"""
+        self.inflation_distribution = max(-1.0, min(1.0, factor))
+
+    def update_distribution(self, value):
+        """Update inflation distribution when slider changes"""
+        # Update label
+        self.distribution_label.setText(f"Inflation Distribution: {value}%")
+        
+        # Notify the converter
+        # Values below 50 concentrate inflation at edges
+        # Values above 50 concentrate inflation at center
+        distribution_factor = (value - 50) / 50.0  # Range from -1.0 to 1.0
+        
+        # You'd need to add this attribute and method to Shape3DConverter
+        self.converter.set_inflation_distribution(distribution_factor)
+        
+        # Update the model if shapes are already detected
+        if self.shapes:
+            self.update_3d_model()
+
+    def toggle_inflation_mode(self, state):
+        """Toggle inflation mode on/off"""
+        is_enabled = state == Qt.CheckState.Checked.value
+        self.converter.set_inflation_enabled(is_enabled)
+        self.inflation_slider.setEnabled(is_enabled)
+        
+        # Update the model if shapes are already detected
+        if self.shapes:
+            self.update_3d_model()
 
     def update_smoothing(self, value):
         """Update smoothing factor and refresh model"""
@@ -1336,13 +1761,25 @@ class MainWindow(QMainWindow):
         
         if self.shapes:  # Refresh model if we have shapes
             self.update_3d_model()
+
+    def update_inflation(self, value):
+        """Update inflation factor when slider changes"""
+        factor = value / 100.0
+        self.inflation_label.setText(f"Inflation: {value}%")
+        self.converter.set_inflation_factor(factor)
+        
+        # Update the model if shapes are already detected
+        if self.shapes:
+            self.update_3d_model()
             
     def toggle_true_3d_mode(self, state):
         """Toggle between standard extrusion and true 3D mode"""
         is_3d_mode = state == Qt.CheckState.Checked.value
         self.converter.set_true_3d_mode(is_3d_mode)
         
+        # If enabling true 3D mode, uncheck heart 3D mode
         if is_3d_mode:
+            self.heart_3d_checkbox.setChecked(False)
             self.height_label.setText(f"Volume: {self.height_slider.value()/100:.2f}")
         else:
             self.height_label.setText(f"Extrusion Height: {self.height_slider.value()/100:.2f}")
@@ -1351,23 +1788,33 @@ class MainWindow(QMainWindow):
         if self.shapes:
             self.update_3d_model()
             
-    def toggle_smooth_heart(self, state):
-        """Toggle smooth heart mode"""
-        is_smooth = state == Qt.CheckState.Checked.value
-        self.converter.set_smooth_heart(is_smooth)
+    def toggle_heart_3d_mode(self, state):
+        """Toggle between standard extrusion and heart 3D mode"""
+        is_heart_mode = state == Qt.CheckState.Checked.value
+        self.converter.set_heart_3d_mode(is_heart_mode)
         
+        # If enabling heart 3D mode, uncheck true 3D mode
+        if is_heart_mode:
+            self.true_3d_checkbox.setChecked(False)
+            self.height_label.setText(f"Heart Detail: {self.height_slider.value()/100:.2f}")
+        else:
+            self.height_label.setText(f"Extrusion Height: {self.height_slider.value()/100:.2f}")
+            
         # Update the model if shapes are already detected
-        if self.shapes and self.has_hearts:
+        if self.shapes:
             self.update_3d_model()
-
+            
     def update_height_and_model(self, value):
         """Update the height label and the 3D model when slider changes"""
-        # Update label
+        # Update label based on current mode
         if self.true_3d_checkbox.isChecked():
             self.height_label.setText(f"Volume: {value/100:.2f}")
+        elif self.heart_3d_checkbox.isChecked():
+            self.height_label.setText(f"Heart Detail: {value/100:.2f}")
         else:
             self.height_label.setText(f"Extrusion Height: {value/100:.2f}")
-            
+
+        self.converter.set_extrusion_strength(value/100.0)
         # Update 3D model if we have shapes
         if self.shapes:
             self.update_3d_model()
@@ -1387,7 +1834,6 @@ class MainWindow(QMainWindow):
             self.original_image = cv2.imread(file_name)
             self.processed_image = None
             self.shapes = None  # Reset shapes
-            self.smooth_heart_checkbox.setEnabled(False)  # Disable smooth heart until detection
 
     def remove_background(self):
         if hasattr(self, 'original_image'):
@@ -1401,7 +1847,6 @@ class MainWindow(QMainWindow):
             ))
             self.processed_image = result
             self.shapes = None  # Reset shapes
-            self.smooth_heart_checkbox.setEnabled(False)  # Disable smooth heart until detection
 
     def detect_shapes_and_convert(self):
         """Detect shapes and convert to 3D"""
@@ -1417,15 +1862,16 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Error", "No shapes detected in the image")
                 return
             
-            # Check if there are any hearts in the detected shapes
-            self.has_hearts = any(shape[0] == 'heart' for shape in self.shapes)
-            self.smooth_heart_checkbox.setEnabled(self.has_hearts)
+            # Check if a heart shape is detected
+            has_heart = any(shape[0] == 'heart' for shape in self.shapes)
             
-            if self.has_hearts:
-                self.smooth_heart_checkbox.setToolTip("Create hearts with smoother edges and realistic shape")
-            else:
-                self.smooth_heart_checkbox.setToolTip("No hearts detected in the image")
-            
+            # If heart is detected, auto-enable inflation for balloon-like effect
+            if has_heart:
+                self.inflation_checkbox.setChecked(True)
+                self.converter.set_inflation_enabled(True)
+                self.inflation_slider.setEnabled(True)
+                self.inflation_slider.setValue(80)  # Set higher inflation for hearts
+                
             # Now create the 3D model
             self.update_3d_model()
             self.export_button.setEnabled(True)
@@ -1462,50 +1908,75 @@ class MainWindow(QMainWindow):
             import traceback
             print(f"Error in update_3d_model: {traceback.format_exc()}")
 
+
     def display_mesh(self, mesh):
+        """Display mesh with realistic rendering and clean grid"""
         self.viewer.clear()
         
         try:
             vertices = mesh.vertices
             faces = mesh.faces
             
-            # Get colors from mesh - ensure we have colors for all faces
+            # Get colors from mesh
             if hasattr(mesh.visual, 'face_colors'):
                 colors = mesh.visual.face_colors
                 # If colors are in 0-255 range, normalize to 0-1
                 if colors.max() > 1.0:
                     colors = colors.astype(np.float32) / 255.0
             else:
-                # Create default gray colors if none exist
+                # Create default colors if none exist
                 colors = np.ones((len(faces), 4)) * [0.5, 0.5, 0.5, 1.0]
             
-            # Validate data
-            if (np.isnan(vertices).any() or np.isinf(vertices).any() or
-                np.isnan(colors).any() or np.isinf(colors).any()):
-                QMessageBox.warning(self, "Error", "Invalid mesh data detected")
-                return
+            # Enhance colors for more realistic appearance
+            enhanced_colors = colors.copy()
+            # Add slight specular highlight to make it look more 3D
+            enhanced_colors[:, 0:3] = np.clip(enhanced_colors[:, 0:3] * 1.2, 0, 1)
                 
-            # Ensure we have enough colors
-            if len(colors) != len(faces):
-                colors = np.tile(colors[0], (len(faces), 1))  # Repeat first color
-                
-            # Create the mesh item with proper colors
+            # Create the mesh item with improved rendering settings
             mesh_item = gl.GLMeshItem(
                 vertexes=vertices,
                 faces=faces,
-                faceColors=colors,  # Use the properly formatted colors
-                smooth=True,
-                drawEdges=False,
-                edgeColor=(0, 0, 0, 0))
+                faceColors=enhanced_colors,
+                smooth=True,  # Enable smooth shading
+                shader='shaded',  # Use shaded rendering mode for more realism
+                glOptions='opaque',  # Opaque rendering for better depth perception
+                drawEdges=False)  # No edges for smoother appearance
                 
             self.viewer.addItem(mesh_item)
+            
+            # Find the minimum z value to place grid at
+            z_min = np.min(vertices[:, 2])
+            
+            # REMOVED: Ground plane with color
+            # Instead, just add a clean grid at the proper height
+            
+            # Add a more detailed grid for better spatial reference
             grid = gl.GLGridItem()
-            grid.setSize(2, 2)
+            # Make grid larger than the object
+            x_min, y_min, _ = np.min(vertices, axis=0)
+            x_max, y_max, _ = np.max(vertices, axis=0)
+            grid_size = max(abs(x_max - x_min), abs(y_max - y_min)) * 3.0  # Larger grid
+            grid.setSize(grid_size, grid_size)
+            grid.setSpacing(grid_size/20, grid_size/20)  # More grid lines for better reference
+            grid.translate(0, 0, z_min - 0.02)  # Place just below the object
+            
+            # Set grid to a subtle light gray (more visible but not distracting)
+            grid.setColor((0.8, 0.8, 0.8, 0.7))
+            
+            # Add the grid to the scene
             self.viewer.addItem(grid)
+            
+            # Set up good lighting with optimal camera position
+            self.viewer.opts['distance'] = 3.5  # Adjust camera distance
+            self.viewer.opts['elevation'] = 30  # View from above
+            self.viewer.opts['azimuth'] = 45    # Angle from side
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to display mesh: {str(e)}")
             print(f"Error in display_mesh: {e}")
+            
+        # Force the viewer to update with the new rendering settings
+        self.viewer.update()
 
     def export_mesh(self):
         if self.current_mesh is None:

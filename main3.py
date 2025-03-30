@@ -956,7 +956,6 @@ class EnhancedMeshGenerator(QThread):
             self.finished.emit(np.array([]), np.array([]), np.array([]))
 
 class RemoveBackgroundThread(QThread):
-    """Thread for removing background"""
     finished = pyqtSignal(np.ndarray, np.ndarray)
     error = pyqtSignal(str)
     
@@ -967,17 +966,28 @@ class RemoveBackgroundThread(QThread):
     
     def run(self):
         try:
+            # Call the background remover
             result_image, mask = self.bg_remover.remove_background(self.image)
+            
+            # Emit the results
             self.finished.emit(result_image, mask)
         except Exception as e:
+            # Emit error message
             self.error.emit(str(e))
+            
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("OneUp:Converting 2D Images Into 3D Model Through Digital Image Processing")
         self.setGeometry(100, 100, 1300, 800)
-        self.setMinimumSize(1200, 700)
+        self.setMinimumSize(900, 600)  # Reduced minimum size to support smaller screens
+        
+        # Initialize the resize timer
+        self.resized_timer = QTimer()
+        self.resized_timer.setSingleShot(True)
+        self.resized_timer.timeout.connect(self.handle_resize)
+        
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #1e1e1e;
@@ -1039,15 +1049,21 @@ class MainWindow(QMainWindow):
                 border-radius: 4px;
                 padding: 4px;
             }
+            /* Added scroll area styling */
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
         """)
         
-        # Initialize background removal
+        # Initialize the rest of the UI and components
         self.init_bg_removal()
-        
         self.init_ui()
+        
+        # Initialize variables
         self.image_path = None
         self.current_mesh = None
-
+        
     def init_bg_removal(self):
         """Initialize background removal feature"""
         self.bg_remover = RembgBackgroundRemover()
@@ -1117,9 +1133,272 @@ class MainWindow(QMainWindow):
         bg_removal_layout.addWidget(self.reset_image_button)
         
         return bg_removal_group
+        
+    def resizeEvent(self, event):
+        """Handle window resize events"""
+        super().resizeEvent(event)
+        # Use a timer to prevent constant updates during resize
+        self.resized_timer.start(200)
+        
+    def handle_resize(self):
+        """Adjust UI elements when window is resized"""
+        width = self.width()
+        
+        # Adjust image preview size based on window width
+        if hasattr(self, 'image_label'):
+            if width < 1000:
+                self.image_label.setFixedSize(300, 225)
+            elif width < 1200:
+                self.image_label.setFixedSize(350, 260)
+            else:
+                self.image_label.setFixedSize(400, 300)
+                
+            # Update image if one is loaded
+            if self.image_path and hasattr(self, 'processed_image') and self.processed_image is not None:
+                height, width, channel = self.processed_image.shape
+                bytes_per_line = 4 * width
+                q_img = QImage(self.processed_image.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888)
+                pixmap = QPixmap.fromImage(q_img)
+                self.image_label.setPixmap(pixmap.scaled(
+                    self.image_label.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                ))
+            elif self.image_path:
+                pixmap = QPixmap(self.image_path)
+                self.image_label.setPixmap(pixmap.scaled(
+                    self.image_label.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                ))
+                
+        # Adjust viewer size based on window width
+        if hasattr(self, 'viewer'):
+            if width < 1000:
+                self.viewer.setMinimumSize(450, 450)
+            elif width < 1200:
+                self.viewer.setMinimumSize(500, 500)
+            else:
+                self.viewer.setMinimumSize(600, 600)
 
+    def init_ui(self):
+        main_widget = QWidget()
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)  # Reduced margins for smaller screens
+        main_layout.setSpacing(10)  # Reduced spacing
+
+        # Create horizontal layout for main content
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(10)  # Reduced spacing
+        
+        # Left panel for image and controls - Wrap in a scroll area for better small screen support
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)  # Reduced spacing
+        
+        # Image preview group
+        image_group = QGroupBox("Image Preview")
+        image_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #404040;
+                border-radius: 6px;
+                margin-top: 6px;
+                padding-top: 10px;
+                background-color: #2d2d2d;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: #ffffff;
+            }
+        """)
+        image_layout = QVBoxLayout(image_group)
+        
+        self.image_label = QLabel("No image selected")
+        self.image_label.setFixedSize(350, 260)  # Reduced default size
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setStyleSheet("""
+            QLabel {
+                background-color: #1e1e1e;
+                border: 2px dashed #404040;
+                border-radius: 4px;
+                color: #808080;
+            }
+        """)
+        self.image_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        image_layout.addWidget(self.image_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        
+        # Background removal group
+        bg_removal_group = self.add_background_removal_ui()
+        
+        # 3D settings group - add collapsible section for small screens
+        settings_group = self.add_3d_settings_ui()
+        
+        # Controls group
+        controls_group = QGroupBox("Controls")
+        controls_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #404040;
+                border-radius: 6px;
+                margin-top: 6px;
+                padding-top: 10px;
+                background-color: #2d2d2d;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: #ffffff;
+            }
+        """)
+        controls_layout = QVBoxLayout(controls_group)
+        
+        # Wrap button layout in flow layout for better wrapping on small screens
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(5)
+        
+        self.select_button = QPushButton("📁 Select Image")
+        self.select_button.setMinimumHeight(40)
+        self.select_button.setStyleSheet(self.button_style)
+        self.select_button.clicked.connect(self.select_image_with_bg_removal)
+        
+        self.convert_button = QPushButton("🔄 Generate 3D Model")
+        self.convert_button.setMinimumHeight(40)
+        self.convert_button.setEnabled(False)
+        self.convert_button.setStyleSheet(self.button_style)
+        self.convert_button.clicked.connect(self.convert_to_3d)
+        
+        self.export_button = QPushButton("💾 Export 3D Model")
+        self.export_button.setMinimumHeight(40)
+        self.export_button.setEnabled(False)
+        self.export_button.setStyleSheet(self.button_style)
+        self.export_button.clicked.connect(self.export_mesh)
+        
+        # Add progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p% Complete")
+        
+        # Use fluid layout for small screens
+        button_layout.addWidget(self.select_button)
+        button_layout.addWidget(self.convert_button)
+        
+        controls_layout.addLayout(button_layout)
+        controls_layout.addWidget(self.progress_bar)
+        controls_layout.addWidget(self.export_button)
+        
+        # Add groups to left panel
+        left_layout.addWidget(image_group)
+        left_layout.addWidget(bg_removal_group)
+        left_layout.addWidget(settings_group)
+        left_layout.addWidget(controls_group)
+        left_layout.addStretch()
+        
+        # Set left panel to scroll area
+        left_scroll.setWidget(left_panel)
+        
+        # Right panel for 3D viewer - also with scroll area
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        
+        viewer_widget = QWidget()
+        viewer_layout = QVBoxLayout(viewer_widget)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
+        
+        viewer_group = QGroupBox("3D Preview")
+        viewer_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #404040;
+                border-radius: 6px;
+                margin-top: 6px;
+                padding-top: 10px;
+                background-color: #2d2d2d;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: #ffffff;
+            }
+        """)
+        viewer_inner_layout = QVBoxLayout(viewer_group)
+        
+        self.viewer = gl.GLViewWidget()
+        self.viewer.setMinimumSize(500, 500)  # Smaller default size
+        self.viewer.setCameraPosition(distance=40, elevation=30, azimuth=45)
+        self.viewer.setBackgroundColor('#1e1e1e')  # Dark background
+        
+        # Add grid for better perspective
+        grid = gl.GLGridItem()
+        grid.setSize(x=100, y=100, z=1)
+        grid.setSpacing(x=10, y=10, z=10)
+        grid.setColor((0.3, 0.3, 0.3, 1.0))  # Dark gray grid
+        self.viewer.addItem(grid)
+        
+        # Add controls for 3D view
+        view_controls = QHBoxLayout()
+        view_controls.setSpacing(5)  # Reduced spacing
+        
+        # Use flow layout for buttons
+        button_size = QSize(80, 30)  # Smaller button size for small screens
+        
+        # Add rotation buttons
+        self.rotate_x_button = QPushButton("Rotate X")
+        self.rotate_x_button.setFixedSize(button_size)
+        self.rotate_x_button.setStyleSheet(self.button_style)
+        self.rotate_x_button.clicked.connect(lambda: self.rotate_view(90, 0, 0))
+        
+        self.rotate_y_button = QPushButton("Rotate Y")
+        self.rotate_y_button.setFixedSize(button_size)
+        self.rotate_y_button.setStyleSheet(self.button_style)
+        self.rotate_y_button.clicked.connect(lambda: self.rotate_view(0, 90, 0))
+        
+        self.rotate_z_button = QPushButton("Rotate Z")
+        self.rotate_z_button.setFixedSize(button_size)
+        self.rotate_z_button.setStyleSheet(self.button_style)
+        self.rotate_z_button.clicked.connect(lambda: self.rotate_view(0, 0, 90))
+        
+        self.reset_view_button = QPushButton("Reset View")
+        self.reset_view_button.setFixedSize(QSize(100, 30))
+        self.reset_view_button.setStyleSheet(self.button_style)
+        self.reset_view_button.clicked.connect(self.reset_view)
+        
+        view_controls.addWidget(self.rotate_x_button)
+        view_controls.addWidget(self.rotate_y_button)
+        view_controls.addWidget(self.rotate_z_button)
+        view_controls.addWidget(self.reset_view_button)
+        view_controls.addStretch()
+        
+        viewer_inner_layout.addWidget(self.viewer)
+        viewer_inner_layout.addLayout(view_controls)
+        
+        viewer_layout.addWidget(viewer_group)
+        right_scroll.setWidget(viewer_widget)
+        
+        # Add panels to content layout with adjustable stretch factors
+        content_layout.addWidget(left_scroll, 1)
+        content_layout.addWidget(right_scroll, 2)
+        
+        # Add content layout to main layout
+        main_layout.addLayout(content_layout)
+        
+        self.setCentralWidget(main_widget)
+    
     def add_3d_settings_ui(self):
-        # 3D Settings group
+        # 3D Settings group with collapsible sections for small screens
         settings_group = QGroupBox("3D Generation Settings")
         settings_group.setStyleSheet("""
             QGroupBox {
@@ -1138,9 +1417,15 @@ class MainWindow(QMainWindow):
             }
         """)
         
-        settings_layout = QFormLayout(settings_group)
+        settings_layout = QVBoxLayout(settings_group)
         settings_layout.setContentsMargins(10, 25, 10, 10)
-        settings_layout.setSpacing(15)
+        settings_layout.setSpacing(10)  # Reduced spacing
+        
+        # Basic settings section (always visible)
+        basic_settings = QWidget()
+        basic_layout = QFormLayout(basic_settings)
+        basic_layout.setContentsMargins(0, 0, 0, 0)
+        basic_layout.setSpacing(10)
         
         # Depth strength slider
         self.depth_slider = QSlider(Qt.Orientation.Horizontal)
@@ -1162,58 +1447,106 @@ class MainWindow(QMainWindow):
         self.add_base_checkbox = QCheckBox("Create Solid 3D Object")
         self.add_base_checkbox.setChecked(True)
         
-        # NEW: Add invert depth checkbox
+        # Add invert depth checkbox
         self.invert_depth_checkbox = QCheckBox("Invert Depth")
         self.invert_depth_checkbox.setChecked(True)  # Default to inverted depth
         self.invert_depth_checkbox.setToolTip("When checked, dark areas will be raised. When unchecked, light areas will be raised.")
         
-        # Create a helper text label
+        # Create a helper text label - made smaller for small screens
         self.invert_depth_label = QLabel("• Checked: Text and details pop up\n• Unchecked: Outlines and borders pop up")
-        self.invert_depth_label.setStyleSheet("color: #999999; font-size: 10px; margin-left: 25px;")
+        self.invert_depth_label.setStyleSheet("color: #999999; font-size: 9px; margin-left: 25px;")
         
-        # Add real dimensions options
+        # Add to basic layout
+        basic_layout.addRow("Depth Strength:", self.depth_slider)
+        basic_layout.addRow("Extrusion Depth:", self.extrusion_slider)
+        basic_layout.addRow("", self.add_base_checkbox)
+        basic_layout.addRow("", self.invert_depth_checkbox)
+        basic_layout.addRow("", self.invert_depth_label)
+        
+        # Advanced settings section (collapsible)
+        advanced_button = QPushButton("Advanced Settings ▼")
+        advanced_button.setStyleSheet("""
+            QPushButton {
+                background-color: #363636;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 5px;
+                text-align: left;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #404040;
+            }
+        """)
+        
+        self.advanced_settings = QWidget()
+        self.advanced_settings.setVisible(False)  # Hidden by default
+        advanced_layout = QFormLayout(self.advanced_settings)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.setSpacing(10)
+        
+        # Use real dimensions checkbox
+        self.use_real_dims_checkbox = QCheckBox("Use Real Dimensions")
+        self.use_real_dims_checkbox.setChecked(True)
+        
+        # Add dimensions with more compact layout
         dimensions_layout = QHBoxLayout()
+        dimensions_layout.setSpacing(5)  # Reduced spacing
         
-        # Width input
+        # Width input - more compact for small screens
         self.width_input = QDoubleSpinBox()
         self.width_input.setRange(1, 1000)
         self.width_input.setValue(100)
         self.width_input.setSuffix(" mm")
+        self.width_input.setFixedWidth(70)
         
         # Height input
         self.height_input = QDoubleSpinBox()
         self.height_input.setRange(1, 1000)
         self.height_input.setValue(100)
         self.height_input.setSuffix(" mm")
+        self.height_input.setFixedWidth(70)
         
         # Depth input
         self.depth_input = QDoubleSpinBox()
         self.depth_input.setRange(1, 1000)
         self.depth_input.setValue(50)
         self.depth_input.setSuffix(" mm")
+        self.depth_input.setFixedWidth(70)
         
-        # Add to dimensions layout
+        # Add to dimensions layout with minimal labels
         dimensions_layout.addWidget(QLabel("W:"))
         dimensions_layout.addWidget(self.width_input)
         dimensions_layout.addWidget(QLabel("H:"))
         dimensions_layout.addWidget(self.height_input)
         dimensions_layout.addWidget(QLabel("D:"))
         dimensions_layout.addWidget(self.depth_input)
+        dimensions_layout.addStretch()
         
-        # Use real dimensions checkbox
-        self.use_real_dims_checkbox = QCheckBox("Use Real Dimensions")
-        self.use_real_dims_checkbox.setChecked(True)
+        # Add to advanced layout
+        advanced_layout.addRow("", self.use_real_dims_checkbox)
+        advanced_layout.addRow("Dimensions:", dimensions_layout)
         
-        # Add to settings layout
-        settings_layout.addRow("Depth Strength:", self.depth_slider)
-        settings_layout.addRow("Extrusion Depth:", self.extrusion_slider)
-        settings_layout.addRow("", self.add_base_checkbox)
-        settings_layout.addRow("", self.invert_depth_checkbox)
-        settings_layout.addRow("", self.invert_depth_label)
-        settings_layout.addRow("", self.use_real_dims_checkbox)
-        settings_layout.addRow("Dimensions:", dimensions_layout)
+        # Connect advanced settings toggle
+        advanced_button.clicked.connect(self.toggle_advanced_settings)
+        
+        # Add sections to settings layout
+        settings_layout.addWidget(basic_settings)
+        settings_layout.addWidget(advanced_button)
+        settings_layout.addWidget(self.advanced_settings)
         
         return settings_group
+    
+    def toggle_advanced_settings(self):
+        """Toggle visibility of advanced settings"""
+        sender = self.sender()
+        self.advanced_settings.setVisible(not self.advanced_settings.isVisible())
+        
+        if self.advanced_settings.isVisible():
+            sender.setText("Advanced Settings ▲")
+        else:
+            sender.setText("Advanced Settings ▼")
 
     def init_ui(self):
         main_widget = QWidget()
