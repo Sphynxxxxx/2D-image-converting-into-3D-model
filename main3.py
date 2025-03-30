@@ -2,6 +2,9 @@ import sys
 import cv2
 import numpy as np
 import trimesh
+import os
+import sys
+import subprocess
 from PIL import Image
 from rembg import remove
 import io
@@ -974,7 +977,6 @@ class RemoveBackgroundThread(QThread):
         except Exception as e:
             # Emit error message
             self.error.emit(str(e))
-            
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1202,6 +1204,8 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(10)  # Reduced spacing
         
+        
+    
         # Image preview group
         image_group = QGroupBox("Image Preview")
         image_group.setStyleSheet("""
@@ -1548,6 +1552,93 @@ class MainWindow(QMainWindow):
         else:
             sender.setText("Advanced Settings ▼")
 
+    def add_back_button(self):
+        """Add a back button to return to the landing page"""
+        # Create back button with distinct styling
+        self.back_button = QPushButton("← Back to Main Menu")
+        self.back_button.setMinimumHeight(40)
+        self.back_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2c3e50;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #34495e;
+            }
+            QPushButton:pressed {
+                background-color: #1a252f;
+            }
+        """)
+        self.back_button.clicked.connect(self.return_to_landing_page)
+        
+        # Insert at the beginning of the left_layout
+        # Find the left panel layout where the image_group is added
+        for child in self.findChildren(QVBoxLayout):
+            # Check if this layout contains our recognizable widgets
+            widgets = [child.itemAt(i).widget() for i in range(child.count()) 
+                    if child.itemAt(i) and child.itemAt(i).widget()]
+            
+            if any(isinstance(w, QGroupBox) and w.title() == "Image Preview" for w in widgets):
+                # This is our left panel layout
+                child.insertWidget(0, self.back_button)
+                break
+
+    def return_to_landing_page(self):
+        """Return to the landing page application"""
+        try:
+            landing_page_path = "landing_page.py"
+            
+            # Check if the landing page script exists
+            if os.path.exists(landing_page_path):
+                # Create a loading message
+                msg = QLabel("Returning to Main Menu...")
+                msg.setStyleSheet("""
+                    background-color: #333333;
+                    color: white;
+                    padding: 10px;
+                    border-radius: 5px;
+                    font-weight: bold;
+                """)
+                msg.setFixedSize(300, 40)
+                msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                
+                # Position at the center of the window
+                msg.setParent(self.centralWidget())
+                msg.move(
+                    (self.centralWidget().width() - msg.width()) // 2,
+                    (self.centralWidget().height() - msg.height()) // 2
+                )
+                msg.show()
+                QApplication.processEvents()
+                
+                # Start the landing page script directly using subprocess
+                if sys.platform == 'win32':  # For Windows
+                    subprocess.Popen([sys.executable, landing_page_path], 
+                                creationflags=subprocess.CREATE_NEW_CONSOLE)
+                else:  # For macOS and Linux
+                    subprocess.Popen([sys.executable, landing_page_path])
+                
+                # Close the current window after a short delay
+                QTimer.singleShot(500, self.close)
+            else:
+                # Show error message if landing page script not found
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    f"Landing page script '{landing_page_path}' not found!"
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to return to landing page: {str(e)}"
+            )
+
     def init_ui(self):
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
@@ -1562,6 +1653,28 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(15)
+        
+        self.back_button = QPushButton("← Back to Main Menu")
+        self.back_button.setMinimumHeight(40)
+        self.back_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2c3e50;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #34495e;
+            }
+            QPushButton:pressed {
+                background-color: #1a252f;
+            }
+        """)
+        self.back_button.clicked.connect(self.return_to_landing_page)
+        left_layout.addWidget(self.back_button)
         
         # Image preview group
         image_group = QGroupBox("Image Preview")

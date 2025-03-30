@@ -5,11 +5,11 @@ import trimesh
 from PIL import Image
 from rembg import remove
 import math
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QPushButton, QLabel, QFileDialog, QMessageBox, QSlider, QCheckBox,
-                           QGroupBox)
-from PyQt6.QtGui import QPixmap, QImage
+                           QGroupBox, QSizePolicy)
+from PyQt6.QtGui import QPixmap, QImage, QCursor, QFont
 import pyqtgraph.opengl as gl
 
 class Shape3DConverter:
@@ -1564,6 +1564,28 @@ class MainWindow(QMainWindow):
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         
+        # Back button at the top
+        self.back_button = QPushButton("← Back to Main Menu")
+        self.back_button.setStyleSheet("""
+            QPushButton {
+                background-color: #333333;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: #444444;
+            }
+            QPushButton:pressed {
+                background-color: #555555;
+            }
+        """)
+        self.back_button.clicked.connect(self.go_back_to_landing_page)
+        left_layout.addWidget(self.back_button)
+        
         # Image display
         self.image_label = QLabel("No image selected")
         self.image_label.setFixedSize(400, 400)
@@ -1668,10 +1690,6 @@ class MainWindow(QMainWindow):
         self.distribution_slider.setEnabled(False)  # Initially disabled
         self.distribution_label = QLabel("Inflation Distribution: 50%")
         
-        #distribution_layout.addWidget(QLabel("Center vs Edge Inflation:"))
-        #distribution_layout.addWidget(self.distribution_slider)
-        #distribution_layout.addWidget(self.distribution_label)
-        
         options_layout.addWidget(distribution_control)
         options_group.setLayout(options_layout)
         
@@ -1697,6 +1715,7 @@ class MainWindow(QMainWindow):
         self.distribution_slider.valueChanged.connect(self.update_distribution)
         self.inflation_checkbox.stateChanged.connect(lambda state: self.distribution_slider.setEnabled(state == Qt.CheckState.Checked.value))
 
+
         #self.smooth_checkbox = QCheckBox("Smooth Surface")
         #self.smooth_checkbox.setChecked(True)
         #self.smooth_checkbox.setToolTip("Apply high-quality smoothing to 3D objects")
@@ -1705,6 +1724,62 @@ class MainWindow(QMainWindow):
         
         # Connect to update function
         #self.smooth_checkbox.stateChanged.connect(self.toggle_smoothing)
+
+    def go_back_to_landing_page(self):
+        """Close this window and launch the landing page"""
+        try:
+            import os
+            import sys
+            import subprocess
+            
+            # Path to the landing page script
+            landing_page_script = "landing_page.py"
+            
+            # Check if the landing page file exists
+            if os.path.exists(landing_page_script):
+                # Create a loading message
+                msg = QLabel("Returning to Main Menu...")
+                msg.setStyleSheet("""
+                    background-color: #333333;
+                    color: white;
+                    padding: 10px;
+                    border-radius: 5px;
+                    font-weight: bold;
+                """)
+                msg.setFixedSize(300, 40)
+                msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                
+                # Position at the center of the window
+                msg.setParent(self.centralWidget())
+                msg.move(
+                    (self.centralWidget().width() - msg.width()) // 2,
+                    (self.centralWidget().height() - msg.height()) // 2
+                )
+                msg.show()
+                QApplication.processEvents()
+                
+                # Start the landing page script directly using subprocess
+                if sys.platform == 'win32':  # For Windows
+                    subprocess.Popen([sys.executable, landing_page_script], 
+                                creationflags=subprocess.CREATE_NEW_CONSOLE)
+                else:  # For macOS and Linux
+                    subprocess.Popen([sys.executable, landing_page_script])
+                
+                # Close the current window after a short delay
+                QTimer.singleShot(500, self.close)
+            else:
+                # Show error message if landing page script not found
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    f"Landing page script '{landing_page_script}' not found!"
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to return to landing page: {str(e)}"
+            )
 
     def toggle_smoothing(self, state):
         """Toggle smoothing on/off"""
