@@ -982,7 +982,6 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("OneUp:Converting 2D Images Into 3D Model Through Digital Image Processing")
-        self.setGeometry(100, 100, 1300, 800)
         self.setMinimumSize(900, 600)  # Reduced minimum size to support smaller screens
         
         # Initialize the resize timer
@@ -1589,7 +1588,7 @@ class MainWindow(QMainWindow):
                 break
 
     def return_to_landing_page(self):
-        """Return to the landing page application"""
+        """Return to the landing page application without showing terminal"""
         try:
             landing_page_path = "landing_page.py"
             
@@ -1616,10 +1615,20 @@ class MainWindow(QMainWindow):
                 msg.show()
                 QApplication.processEvents()
                 
-                # Start the landing page script directly using subprocess
+                # Start the landing page script without showing console
                 if sys.platform == 'win32':  # For Windows
-                    subprocess.Popen([sys.executable, landing_page_path], 
-                                creationflags=subprocess.CREATE_NEW_CONSOLE)
+                    # Method 1: Use pythonw.exe
+                    pythonw_path = sys.executable.replace('python.exe', 'pythonw.exe')
+                    if os.path.exists(pythonw_path):
+                        subprocess.Popen([pythonw_path, landing_page_path])
+                    else:
+                        # Method 2: Use startupinfo to hide console
+                        startupinfo = subprocess.STARTUPINFO()
+                        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                        startupinfo.wShowWindow = subprocess.SW_HIDE
+                        subprocess.Popen([sys.executable, landing_page_path],
+                                    startupinfo=startupinfo,
+                                    creationflags=subprocess.DETACHED_PROCESS)
                 else:  # For macOS and Linux
                     subprocess.Popen([sys.executable, landing_page_path])
                 
@@ -2202,7 +2211,7 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec())
 
 

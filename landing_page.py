@@ -58,7 +58,7 @@ class CardWidget(QFrame):
         # Description
         desc_label = QLabel(description)
         desc_label.setWordWrap(True)
-        desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        desc_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         desc_label.setStyleSheet("color: #95a5a6;")
         desc_label.setContentsMargins(20, 0, 20, 0)
         
@@ -129,6 +129,19 @@ class LandingPage(QMainWindow):
                 font-size: 16px;
                 color: #95a5a6;
             }
+            QLabel#section-title {
+                font-size: 24px;
+                font-weight: bold;
+                color: white;
+            }
+            QLabel#description {
+                font-size: 14px;
+                color: #95a5a6;
+            }
+            QFrame#divider {
+                border: 1px solid #333;
+                margin: 20px 0;
+            }
         """)
         
         self.central_widget = QWidget()
@@ -162,7 +175,7 @@ class LandingPage(QMainWindow):
         title_label = QLabel("OneUp")
         title_label.setObjectName("app-title")
         
-        subtitle_label = QLabel("Converting 2D Images Into 3D Models")
+        subtitle_label = QLabel("Converting 2D Images into 3D Models")
         subtitle_label.setObjectName("app-subtitle")
         
         title_layout.addWidget(title_label)
@@ -175,14 +188,19 @@ class LandingPage(QMainWindow):
         
         # Hero section
         hero_label = QLabel("Transform 2D Images into 3D Models")
-        hero_label.setFont(QFont("Arial", 24, QFont.Weight.Bold))
+        hero_label.setObjectName("section-title")
         hero_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        description_label = QLabel("OneUp uses advanced digital image processing to convert your 2D images into high-quality 3D models ready for printing, design, or digital use.")
+        description_label = QLabel("")
+        description_label.setObjectName("description")
         description_label.setWordWrap(True)
-        description_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        description_label.setStyleSheet("color: #95a5a6; font-size: 14px; max-width: 800px;")
-        description_label.setContentsMargins(100, 0, 100, 0)
+        description_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        description_label.setMaximumWidth(800)
+        
+        # Divider
+        divider = QFrame()
+        divider.setObjectName("divider")
+        divider.setFrameShape(QFrame.Shape.HLine)
         
         # Cards container
         cards_layout = QHBoxLayout()
@@ -191,31 +209,30 @@ class LandingPage(QMainWindow):
         # Shape converter card
         shape_card = CardWidget(
             "3D Shape Converter",
-            "",
-            "shape.png",  # Path to image - will show placeholder if not found
+            "Convert 2D shapes to 3D models",
+            "shape.png",
             "Open Shape Converter",
             "#3498db"
         )
         
-        # Logo converter card
-        logo_card = CardWidget(
-            "3D Logo Converter",
-            "",
-            "logo.png",  # Path to image - will show placeholder if not found
-            "Open Logo Converter",
+        # Object converter card
+        object_card = CardWidget(
+            "3D Object Converter",
+            "Convert 2D objects to 3D models",
+            "object.png",
+            "Open Object Converter",
             "#2ecc71"
         )
         
         # Connect buttons to actions
         shape_card.button.clicked.connect(self.open_shape_converter)
-        logo_card.button.clicked.connect(self.open_logo_converter)
+        object_card.button.clicked.connect(self.open_object_converter)
         
         cards_layout.addWidget(shape_card)
-        cards_layout.addWidget(logo_card)
-        
+        cards_layout.addWidget(object_card)
         
         # Footer
-        footer_label = QLabel("© 2025 OneUp: Converting 2D Images Into 3D Model. All rights reserved.")
+        footer_label = QLabel("© 2025 OneUp. Converting 2D Images into 3D Model. All rights reserved.")
         footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer_label.setStyleSheet("color: #95a5a6; margin-top: 20px;")
         
@@ -223,62 +240,38 @@ class LandingPage(QMainWindow):
         main_layout.addLayout(header_layout)
         main_layout.addSpacing(20)
         main_layout.addWidget(hero_label)
-        main_layout.addWidget(description_label)
+        main_layout.addWidget(description_label, 0, Qt.AlignmentFlag.AlignHCenter)
+        main_layout.addWidget(divider)
         main_layout.addSpacing(20)
         main_layout.addLayout(cards_layout)
         main_layout.addSpacing(40)
-        main_layout.addSpacing(20)
         main_layout.addStretch()
         main_layout.addWidget(footer_label)
     
-    def create_feature_widget(self, icon, title, description):
-        feature = QFrame()
-        feature.setStyleSheet("""
-            QFrame {
-                background-color: #2d2d2d;
-                border-radius: 10px;
-                padding: 15px;
-            }
-        """)
-        
-        layout = QVBoxLayout(feature)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        icon_label = QLabel(icon)
-        icon_label.setFont(QFont("Arial", 24))
-        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        title_label = QLabel(title)
-        title_label.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        desc_label = QLabel(description)
-        desc_label.setWordWrap(True)
-        desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        desc_label.setStyleSheet("color: #95a5a6;")
-        
-        layout.addWidget(icon_label)
-        layout.addWidget(title_label)
-        layout.addWidget(desc_label)
-        
-        return feature
-    
     def open_shape_converter(self):
-        """Open the 2D to 3D shape converter application and close the landing page"""
-        print("Opening 2D to 3D Shape Converter...")
-        
+        """Open the shape converter application"""
+        print("Opening 3D Shape Converter...")
+        self._open_converter("main.py", "3D Shape Converter", "#3498db")
+    
+    def open_object_converter(self):
+        """Open the object converter application"""
+        print("Opening 3D Object Converter...")
+        self._open_converter("main3.py", "3D Object Converter", "#2ecc71")
+    
+    def _open_converter(self, script_name, name, color):
+        """Generic method to open a converter"""
         try:
-            converter_script = "main.py"  # Path to your shape converter script
-            
-            # Check if the file exists
-            if os.path.exists(converter_script):
-                # Create loading message
-                msg = QLabel("Launching 2D to 3D Shape Converter...")
-                msg.setStyleSheet("background-color: #3498db; color: white; padding: 10px; border-radius: 5px;")
+            if os.path.exists(script_name):
+                # Show loading message
+                msg = QLabel(f"Launching {name}...")
+                msg.setStyleSheet(f"""
+                    background-color: {color}; 
+                    color: white; 
+                    padding: 10px; 
+                    border-radius: 5px;
+                """)
                 msg.setFixedSize(300, 40)
                 msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                
-                # Position at the center of the window
                 msg.setParent(self.central_widget)
                 msg.move(
                     (self.central_widget.width() - msg.width()) // 2,
@@ -287,127 +280,46 @@ class LandingPage(QMainWindow):
                 msg.show()
                 QApplication.processEvents()
                 
-                # Start the shape converter directly using subprocess
-                if sys.platform == 'win32':  # For Windows
-                    subprocess.Popen([sys.executable, converter_script], 
-                                   creationflags=subprocess.CREATE_NEW_CONSOLE)
-                else:  # For macOS and Linux
-                    subprocess.Popen([sys.executable, converter_script])
+                # Start the converter without console window
+                if sys.platform == 'win32':
+                    DETACHED_PROCESS = 0x00000008
+                    subprocess.Popen([sys.executable, script_name], 
+                                    creationflags=DETACHED_PROCESS,
+                                    close_fds=True)
+                else:
+                    subprocess.Popen([sys.executable, script_name])
                 
-                # Close the landing page after a short delay
+                # Close the landing page
                 QTimer.singleShot(1000, self.close)
-                
             else:
-                # If file doesn't exist, show error message
-                msg = QLabel("Error: main.py not found!")
-                msg.setStyleSheet("background-color: #e74c3c; color: white; padding: 10px; border-radius: 5px;")
-                msg.setFixedSize(350, 40)
-                msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                
-                # Position at the center of the window
-                msg.setParent(self.central_widget)
-                msg.move(
-                    (self.central_widget.width() - msg.width()) // 2,
-                    (self.central_widget.height() - msg.height()) // 2
-                )
-                msg.show()
-                
-                # Auto-hide after 3 seconds
-                QTimer.singleShot(3000, msg.hide)
+                self._show_error(f"Error: {script_name} not found!")
         except Exception as e:
-            print(f"Error opening shape converter: {str(e)}")
-            # Show error message
-            msg = QLabel(f"Error: {str(e)}")
-            msg.setStyleSheet("background-color: #e74c3c; color: white; padding: 10px; border-radius: 5px;")
-            msg.setFixedSize(350, 40)
-            msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            msg.setParent(self.central_widget)
-            msg.move(
-                (self.central_widget.width() - msg.width()) // 2,
-                (self.central_widget.height() - msg.height()) // 2
-            )
-            msg.show()
-            QTimer.singleShot(3000, msg.hide)
-        
-    def open_logo_converter(self):
-        """Open the logo converter application and close the landing page"""
-        print("Opening 3D Logo Converter...")
-        
-        try:
-            converter_script = "main3.py"  # Direct path to your 3D converter script
-            
-            # Check if the file exists
-            if os.path.exists(converter_script):
-                # Create loading message
-                msg = QLabel("Launching 3D Logo Converter...")
-                msg.setStyleSheet("background-color: #2ecc71; color: white; padding: 10px; border-radius: 5px;")
-                msg.setFixedSize(300, 40)
-                msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                
-                # Position at the center of the window
-                msg.setParent(self.central_widget)
-                msg.move(
-                    (self.central_widget.width() - msg.width()) // 2,
-                    (self.central_widget.height() - msg.height()) // 2
-                )
-                msg.show()
-                QApplication.processEvents()
-                
-                # Start the logo converter directly using subprocess
-                # This method works better for launching fullscreen applications
-                if sys.platform == 'win32':  # For Windows
-                    subprocess.Popen([sys.executable, converter_script], 
-                                   creationflags=subprocess.CREATE_NEW_CONSOLE)
-                else:  # For macOS and Linux
-                    subprocess.Popen([sys.executable, converter_script])
-                
-                # Close the landing page after a short delay
-                QTimer.singleShot(1000, self.close)
-                
-            else:
-                # If file doesn't exist, show error message
-                msg = QLabel("Error: main3.py not found!")
-                msg.setStyleSheet("background-color: #e74c3c; color: white; padding: 10px; border-radius: 5px;")
-                msg.setFixedSize(350, 40)
-                msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                
-                # Position at the center of the window
-                msg.setParent(self.central_widget)
-                msg.move(
-                    (self.central_widget.width() - msg.width()) // 2,
-                    (self.central_widget.height() - msg.height()) // 2
-                )
-                msg.show()
-                
-                # Auto-hide after 3 seconds
-                QApplication.processEvents()
-                import time
-                time.sleep(3)
-                msg.hide()
-        except Exception as e:
-            print(f"Error opening logo converter: {str(e)}")
-            # Show error message
-            msg = QLabel(f"Error: {str(e)}")
-            msg.setStyleSheet("background-color: #e74c3c; color: white; padding: 10px; border-radius: 5px;")
-            msg.setFixedSize(350, 40)
-            msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            msg.setParent(self.central_widget)
-            msg.move(
-                (self.central_widget.width() - msg.width()) // 2,
-                (self.central_widget.height() - msg.height()) // 2
-            )
-            msg.show()
-            QTimer.singleShot(3000, msg.hide)
+            self._show_error(f"Error: {str(e)}")
+    
+    def _show_error(self, message):
+        """Show error message"""
+        msg = QLabel(message)
+        msg.setStyleSheet("""
+            background-color: #e74c3c; 
+            color: white; 
+            padding: 10px; 
+            border-radius: 5px;
+        """)
+        msg.setFixedSize(350, 40)
+        msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        msg.setParent(self.central_widget)
+        msg.move(
+            (self.central_widget.width() - msg.width()) // 2,
+            (self.central_widget.height() - msg.height()) // 2
+        )
+        msg.show()
+        QTimer.singleShot(3000, msg.hide)
 
 
 def main():
     app = QApplication(sys.argv)
     window = LandingPage()
-    
-    # Use a timer to maximize the window after it's shown
-    window.show()
-    QTimer.singleShot(500, window.showMaximized)
-    
+    window.showMaximized()
     sys.exit(app.exec())
 
 

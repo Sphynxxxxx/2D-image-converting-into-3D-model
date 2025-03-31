@@ -1395,7 +1395,6 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("2D to 3D Shape Converter")
-        self.setGeometry(100, 100, 1200, 800)
         self.converter = Shape3DConverter()
         self.current_mesh = None
         self.shapes = None
@@ -1611,61 +1610,7 @@ class MainWindow(QMainWindow):
             lambda state: self.distribution_slider.setEnabled(state == Qt.CheckState.Checked)
         )
 
-    def go_back_to_landing_page(self):
-        """Close this window and launch the landing page"""
-        try:
-            import os
-            import sys
-            import subprocess
-            
-            # Path to the landing page script
-            landing_page_script = "landing_page.py"
-            
-            # Check if the landing page file exists
-            if os.path.exists(landing_page_script):
-                # Create a loading message
-                msg = QLabel("Returning to Main Menu...")
-                msg.setStyleSheet("""
-                    background-color: #333333;
-                    color: white;
-                    padding: 10px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                """)
-                msg.setFixedSize(300, 40)
-                msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                
-                # Position at the center of the window
-                msg.setParent(self.centralWidget())
-                msg.move(
-                    (self.centralWidget().width() - msg.width()) // 2,
-                    (self.centralWidget().height() - msg.height()) // 2
-                )
-                msg.show()
-                QApplication.processEvents()
-                
-                # Start the landing page script directly using subprocess
-                if sys.platform == 'win32':  # For Windows
-                    subprocess.Popen([sys.executable, landing_page_script], 
-                                creationflags=subprocess.CREATE_NEW_CONSOLE)
-                else:  # For macOS and Linux
-                    subprocess.Popen([sys.executable, landing_page_script])
-                
-                # Close the current window after a short delay
-                QTimer.singleShot(500, self.close)
-            else:
-                # Show error message if landing page script not found
-                QMessageBox.warning(
-                    self,
-                    "Error",
-                    f"Landing page script '{landing_page_script}' not found!"
-                )
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Error",
-                f"Failed to return to landing page: {str(e)}"
-            )
+    
 
     def change_units(self, unit):
         """Handle unit system change"""
@@ -1979,10 +1924,73 @@ class MainWindow(QMainWindow):
                 
             QMessageBox.information(self, "Success", f"Model saved to {file_name}")
 
+
+    def go_back_to_landing_page(self):
+        """Close this window and launch the landing page without showing terminal"""
+        try:
+            import os
+            import sys
+            import subprocess
+            
+            # Path to the landing page script
+            landing_page_script = "landing_page.py"
+            
+            # Check if the landing page file exists
+            if os.path.exists(landing_page_script):
+                # Create a loading message
+                msg = QLabel("Returning to Main Menu...")
+                msg.setStyleSheet("""
+                    background-color: #333333;
+                    color: white;
+                    padding: 10px;
+                    border-radius: 5px;
+                    font-weight: bold;
+                """)
+                msg.setFixedSize(300, 40)
+                msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                
+                # Position at the center of the window
+                msg.setParent(self.centralWidget())
+                msg.move(
+                    (self.centralWidget().width() - msg.width()) // 2,
+                    (self.centralWidget().height() - msg.height()) // 2
+                )
+                msg.show()
+                QApplication.processEvents()
+                
+                # Start the landing page script without showing console
+                if sys.platform == 'win32':
+                    # Windows-specific solution to hide console
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
+                    subprocess.Popen([sys.executable, landing_page_script],
+                                startupinfo=startupinfo,
+                                creationflags=subprocess.DETACHED_PROCESS)
+                else:
+                    # For macOS and Linux
+                    subprocess.Popen([sys.executable, landing_page_script])
+                
+                # Close the current window after a short delay
+                QTimer.singleShot(500, self.close)
+            else:
+                # Show error message if landing page script not found
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    f"Landing page script '{landing_page_script}' not found!"
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to return to landing page: {str(e)}"
+            )
+
 def main():
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec())
 
 if __name__ == "__main__":
