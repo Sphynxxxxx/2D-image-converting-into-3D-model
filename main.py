@@ -8,7 +8,7 @@ import math
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QPushButton, QLabel, QFileDialog, QMessageBox, QSlider, QCheckBox,
-                           QGroupBox, QSizePolicy)
+                           QGroupBox, QSizePolicy, QComboBox, QDoubleSpinBox)
 from PyQt6.QtGui import QPixmap, QImage, QCursor, QFont
 import pyqtgraph.opengl as gl
 
@@ -17,12 +17,38 @@ class Shape3DConverter:
         self.circle_segments = 72
         self.sphere_segments = 64
         self.true_3d_mode = False
-        self.heart_3d_mode = False
         self.smoothing_factor = 0.0
         self.inflation_enabled = False
         self.inflation_factor = 0.5
         self.inflation_distribution = 0.0
         self.extrusion_strength = 1.0
+        self.corner_radius = 0.0
+        self.scale_factor = 1.0 
+        self.unit = 'mm'
+
+    def set_scale_factor(self, factor):
+        """Set the scale factor for metric conversion"""
+        self.scale_factor = factor
+
+    def set_unit(self, unit):
+        """Set the current unit system"""
+        self.unit = unit
+        # Update scale factor based on unit
+        if unit == 'mm':
+            self.scale_factor = 1.0
+        elif unit == 'cm':
+            self.scale_factor = 10.0
+        elif unit == 'm':
+            self.scale_factor = 1000.0
+        elif unit == 'in':
+            self.scale_factor = 25.4
+        elif unit == 'ft':
+            self.scale_factor = 304.8
+
+
+    def set_corner_radius(self, radius):
+        """Set the corner radius for mesh generation"""
+        self.corner_radius = max(0.0, min(1.0, radius))  # Ensure value is between 0 and 1
 
     def set_extrusion_strength(self, strength):
         self.extrusion_strength = max(0.1, min(3.0, strength))
@@ -41,8 +67,7 @@ class Shape3DConverter:
 
     def set_true_3d_mode(self, enabled):
         self.true_3d_mode = enabled
-        if enabled:
-            self.heart_3d_mode = False
+    
         
     def set_heart_3d_mode(self, enabled):
         self.heart_3d_mode = enabled
@@ -92,7 +117,7 @@ class Shape3DConverter:
             
             normalized_distances = distances_from_center / max_distance
             
-            if self.inflation_distribution > 0:
+            if self.inflation_distribution > 1.0:
                 power = 2.0 - self.inflation_distribution
                 scale_factors = 1.0 + inflation_distance * (1.0 - normalized_distances ** power)
             elif self.inflation_distribution < 0:
@@ -566,6 +591,10 @@ class Shape3DConverter:
             if np.any(np.isnan(vertices_2d)) or np.any(np.isinf(vertices_2d)):
                 return vertices_3d, faces, colors
             
+            # Apply corner rounding if corner_radius is > 0
+            if self.corner_radius > 0 and len(vertices_2d) > 2:
+                vertices_2d = self._round_polygon_corners(vertices_2d, self.corner_radius)
+            
             n = len(vertices_2d)
             center_x, center_y = np.mean(vertices_2d[:,0]), np.mean(vertices_2d[:,1])
             
@@ -576,7 +605,7 @@ class Shape3DConverter:
                 
                 back_start = n
                 for x, y in vertices_2d:
-                    vertices_3d.append([x, y, height])
+                    vertices_3d.append([x, y, height * self.extrusion_strength])
                     colors.append(color)
                 
                 center_front = len(vertices_3d)
@@ -587,7 +616,7 @@ class Shape3DConverter:
                     faces.append([center_front, i, (i+1)%n])
                 
                 center_back = len(vertices_3d)
-                vertices_3d.append([center_x, center_y, height])
+                vertices_3d.append([center_x, center_y, height * self.extrusion_strength])
                 colors.append(color)
                 
                 for i in range(n):
@@ -599,7 +628,7 @@ class Shape3DConverter:
                     faces.append([i, back_start+next_i, back_start+i])
             else:
                 max_dim = max(np.max(vertices_2d[:,0]) - np.min(vertices_2d[:,0]),
-                              np.max(vertices_2d[:,1]) - np.min(vertices_2d[:,1]))
+                            np.max(vertices_2d[:,1]) - np.min(vertices_2d[:,1]))
                 depth = max_dim * 0.8 * height
                 
                 for x, y in vertices_2d:
@@ -635,6 +664,70 @@ class Shape3DConverter:
             return [], [], []
         
         return vertices_3d, faces, colors
+    
+    def _round_polygon_corners(self, vertices, radius_factor):
+        """
+        Round the corners of a polygon using Bezier curve interpolation
+        
+        :param vertices: Original polygon vertices
+        :param radius_factor: Smoothing factor (0-1)
+        :return: New vertices with rounded corners
+        """
+        import numpy as np
+        
+        def interpolate_point(p1, p2, t):
+            """Linear interpolation between two points"""
+            return p1 * (1 - t) + p2 * t
+        
+        def bezier_quadratic(p0, p1, p2, t):
+            """Quadratic Bezier curve interpolation"""
+            a = interpolate_point(p0, p1, t)
+            b = interpolate_point(p1, p2, t)
+            return interpolate_point(a, b, t)
+        
+        rounded_vertices = []
+        num_vertices = len(vertices)
+        
+        # Number of interpolation points for each rounded corner
+        corner_segments = max(3, int(10 * radius_factor))
+        
+        for i in range(num_vertices):
+            # Current vertex and neighboring vertices
+            current = vertices[i]
+            prev = vertices[(i-1)%num_vertices]
+            next = vertices[(i+1)%num_vertices]
+            
+            # Calculate vectors
+            vec1 = prev - current
+            vec2 = next - current
+            
+            # Normalize vectors
+            len1 = np.linalg.norm(vec1)
+            len2 = np.linalg.norm(vec2)
+            
+            if len1 > 0 and len2 > 0:
+                vec1 /= len1
+                vec2 /= len2
+                
+                # Minimum corner radius to prevent overlap
+                min_side_length = min(len1, len2)
+                max_radius = min_side_length * 0.4
+                corner_radius = radius_factor * max_radius
+                
+                # Control point (vertex of the original angle)
+                control_point = current
+                
+                # Start and end points of the curve
+                start_point = current + vec1 * corner_radius
+                end_point = current + vec2 * corner_radius
+                
+                # Generate interpolated points for the rounded corner
+                for j in range(corner_segments):
+                    t = j / (corner_segments - 1)
+                    rounded_point = bezier_quadratic(start_point, control_point, end_point, t)
+                    rounded_vertices.append(rounded_point)
+        
+        return np.array(rounded_vertices)
 
     def create_rectangle_mesh(self, vertices_2d, height, color):
         vertices_3d = []
@@ -642,6 +735,10 @@ class Shape3DConverter:
         colors = []
         
         try:
+            # Apply corner rounding if corner_radius is > 0
+            if self.corner_radius > 0:
+                vertices_2d = self._round_polygon_corners(vertices_2d, self.corner_radius)
+
             if len(vertices_2d) != 4:
                 return self.create_polygon_mesh(vertices_2d, height, color)
                 
@@ -700,7 +797,7 @@ class Shape3DConverter:
         
         cx, cy = center
         
-        if not self.true_3d_mode and not self.heart_3d_mode:
+        if not self.true_3d_mode:  # Removed heart_3d_mode check
             # Standard circle extrusion
             # Front face
             front_start = 0
@@ -730,7 +827,7 @@ class Shape3DConverter:
             
             # Back center
             back_center = len(vertices)
-            vertices.append([cx, cy, height])
+            vertices.append([cx, cy, height * self.extrusion_strength])  # Apply extrusion_strength here too
             colors.append(color)
             
             for i in range(self.circle_segments):
@@ -741,7 +838,7 @@ class Shape3DConverter:
                 next_i = (i+1)%self.circle_segments
                 faces.append([i, next_i, back_start+next_i])
                 faces.append([i, back_start+next_i, back_start+i])
-        elif self.true_3d_mode:
+        else:  # true_3d_mode
             # Create a sphere
             for phi_idx in range(self.sphere_segments):
                 phi = math.pi * phi_idx / (self.sphere_segments - 1)
@@ -774,48 +871,6 @@ class Shape3DConverter:
                         faces.append([curr1, curr2, next2])
                     if phi_idx < self.sphere_segments - 2:  # Skip the bottom pole triangles
                         faces.append([curr1, next2, next1])
-        else:  # heart_3d_mode
-            # Create a heart-shaped mesh
-            horizontal_segments = 84
-            vertical_segments = 64
-
-            # Generate parametric heart
-            for v_idx in range(vertical_segments + 1):
-                v = v_idx / vertical_segments
-                for h_idx in range(horizontal_segments): 
-                    u = 2 * math.pi * h_idx / horizontal_segments
-                    
-                    cos_u = math.cos(u)
-                    sin_u = math.sin(u)
-                    
-                    x = radius * (
-                        16 * math.sin(u) ** 3 * math.sin(v * math.pi)
-                    ) / 16
-                    
-                    y = radius * (
-                        (13 * math.cos(u) - 5 * math.cos(2*u) - 2 * math.cos(3*u) - math.cos(4*u)) * math.sin(v * math.pi)
-                    ) / 16
-                    
-                    z = radius * math.cos(v * math.pi) * 0.8
-                    
-                    # Offset to center position
-                    vertices.append([cx + x, cy + y, z * height])
-                    colors.append(color)
-            
-            # Generate faces connecting vertices
-            for v_idx in range(vertical_segments):
-                for h_idx in range(horizontal_segments):
-                    # Current row indices
-                    curr1 = v_idx * horizontal_segments + h_idx
-                    curr2 = v_idx * horizontal_segments + (h_idx + 1) % horizontal_segments
-                    
-                    # Next row indices
-                    next1 = (v_idx + 1) * horizontal_segments + h_idx
-                    next2 = (v_idx + 1) * horizontal_segments + (h_idx + 1) % horizontal_segments
-                    
-                    # Create faces (two triangles)
-                    faces.append([curr1, curr2, next2])
-                    faces.append([curr1, next2, next1])
                         
         return vertices, faces, colors
 
@@ -888,7 +943,7 @@ class Shape3DConverter:
             center_x, center_y = np.mean(points[:,0]), np.mean(points[:,1])
             n = len(points)
             
-            if not self.true_3d_mode and not self.heart_3d_mode:
+            if not self.true_3d_mode:  # Removed heart_3d_mode check
                 # Standard extrusion
                 for x, y in points:
                     vertices_3d.append([x, y, 0])
@@ -907,7 +962,7 @@ class Shape3DConverter:
                     faces.append([center_front, i, (i+1)%n])
                 
                 center_back = len(vertices_3d)
-                vertices_3d.append([center_x, center_y, height])
+                vertices_3d.append([center_x, center_y, height * self.extrusion_strength])  # Apply extrusion_strength here too
                 colors.append(color)
                 
                 for i in range(n):
@@ -1000,11 +1055,7 @@ class Shape3DConverter:
             x_max, y_max = np.max(points, axis=0)
             center_x = (x_min + x_max) / 2
             center_y = (y_min + y_max) / 2
-            size = max(x_max - x_min, y_max - y_min) / 2
             
-            if self.heart_3d_mode:
-                return self.create_realistic_heart_mesh((center_x, center_y), size, height, color)
-                
             n = len(points)
             
             for x, y in points:
@@ -1024,7 +1075,7 @@ class Shape3DConverter:
                 faces.append([center_front, i, (i+1)%n])
             
             center_back = len(vertices)
-            vertices.append([center_x, center_y, height])
+            vertices.append([center_x, center_y, height * self.extrusion_strength])  # Apply extrusion_strength here too
             colors.append(color)
             
             for i in range(n):
@@ -1068,7 +1119,7 @@ class Shape3DConverter:
                 vertices, faces, colors = self.create_fraction_mesh(
                     params, height_px, color
                 )
-            elif shape_type == 'rectangle' and (self.true_3d_mode or self.heart_3d_mode):
+            elif shape_type == 'rectangle' and self.true_3d_mode:  # Removed heart_3d_mode check
                 vertices, faces, colors = self.create_rectangle_mesh(
                     params, height_px, color
                 )
@@ -1117,46 +1168,146 @@ class Shape3DConverter:
         
         return mesh
     
+    def advanced_edge_smoothing(self, mesh, smoothing_iterations=5, preserve_features=True):
+        """
+        Advanced mesh edge smoothing algorithm
+        
+        Args:
+            mesh (trimesh.Trimesh): Input mesh to be smoothed
+            smoothing_iterations (int): Number of smoothing iterations
+            preserve_features (bool): Whether to preserve sharp features
+        
+        Returns:
+            trimesh.Trimesh: Smoothed mesh
+        """
+        try:
+            # Create a copy of the mesh to avoid modifying the original
+            smoothed_mesh = mesh.copy()
+            vertices = smoothed_mesh.vertices.copy()
+            
+            # Compute vertex adjacency and normals
+            adjacency = smoothed_mesh.vertex_neighbors
+            vertex_normals = smoothed_mesh.vertex_normals
+            
+            # Compute edge information
+            edge_lengths = np.linalg.norm(
+                vertices[smoothed_mesh.edges[:, 0]] - vertices[smoothed_mesh.edges[:, 1]], 
+                axis=1
+            )
+            median_edge_length = np.median(edge_lengths)
+            
+            for iteration in range(smoothing_iterations):
+                # Compute vertex offsets
+                offsets = np.zeros_like(vertices)
+                
+                for i in range(len(vertices)):
+                    # Get neighboring vertices
+                    neighbors = adjacency[i]
+                    
+                    if not neighbors:
+                        continue
+                    
+                    # Compute neighbor vertices and their positions
+                    neighbor_verts = vertices[neighbors]
+                    
+                    # Compute centroid of neighboring vertices
+                    centroid = np.mean(neighbor_verts, axis=0)
+                    
+                    # Compute displacement vector
+                    displacement = centroid - vertices[i]
+                    
+                    # Feature preservation
+                    if preserve_features:
+                        # Compute angle between vertex normal and displacement
+                        vertex_normal = vertex_normals[i]
+                        angle = np.arccos(np.clip(
+                            np.dot(displacement, vertex_normal) / 
+                            (np.linalg.norm(displacement) * np.linalg.norm(vertex_normal) + 1e-8), 
+                            -1.0, 1.0
+                        ))
+                        
+                        # Adjust smoothing based on angle
+                        smoothing_factor = (1 - np.abs(angle) / np.pi) ** 2
+                        
+                        # Adaptive smoothing strength
+                        edge_variation = np.std(np.linalg.norm(neighbor_verts - vertices[i], axis=1))
+                        adaptive_strength = min(1.0, edge_variation / median_edge_length)
+                        
+                        # Combine smoothing factors
+                        smoothing_strength = smoothing_factor * adaptive_strength * 0.5
+                    else:
+                        smoothing_strength = 0.5
+                    
+                    # Apply smoothing offset
+                    offsets[i] = displacement * smoothing_strength
+                
+                # Update vertex positions
+                vertices += offsets
+            
+            # Update mesh vertices
+            smoothed_mesh.vertices = vertices
+            
+            return smoothed_mesh
+        
+        except Exception as e:
+            print(f"Advanced edge smoothing failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return mesh
+
     def smooth_mesh(self, mesh, factor):
+        """
+        Enhanced mesh smoothing method
+        
+        Args:
+            mesh (trimesh.Trimesh): Input mesh to be smoothed
+            factor (float): Smoothing intensity factor (0-1)
+        
+        Returns:
+            trimesh.Trimesh: Smoothed mesh
+        """
         try:
             if factor < 0.05:
                 return mesh
-                
+            
+            # Determine number of iterations based on smoothing factor
+            iterations = max(1, min(10, int(factor * 10)))
+            
+            # Check mesh validity
             if not mesh.is_watertight:
                 print("Warning: Mesh is not watertight, using simplified smoothing")
                 return self.simple_smooth_mesh(mesh, factor)
-                
+            
             if np.any(np.isnan(mesh.vertices)) or np.any(np.isinf(mesh.vertices)):
                 print("Warning: Mesh contains invalid coordinates, skipping smoothing")
                 return mesh
-                
+            
+            # Identify and protect center vertices
             vertex_face_count = np.zeros(len(mesh.vertices), dtype=np.int32)
             for face in mesh.faces:
                 for vertex in face:
                     vertex_face_count[vertex] += 1
-                    
+            
             center_vertices = np.where(vertex_face_count > np.mean(vertex_face_count) * 1.5)[0]
             
-            original_centers = {}
-            for idx in center_vertices:
-                original_centers[idx] = mesh.vertices[idx, 2]
+            # Store original center vertex heights
+            original_centers = {idx: mesh.vertices[idx, 2] for idx in center_vertices}
             
-            iterations = max(1, min(5, int(factor * 10)))
-                
-            try:
-                smoothed = self.taubin_smooth_mesh(mesh, iterations)
-                
-                for idx, z_val in original_centers.items():
-                    smoothed.vertices[idx, 2] = z_val
-                    
-                return smoothed
-            except ValueError as e:
-                print(f"Taubin smoothing failed with error: {e}")
-                print("Falling back to simple smoothing")
-                return self.simple_smooth_mesh_with_center_protection(mesh, factor, original_centers)
-                
+            # Apply advanced edge smoothing
+            smoothed_mesh = self.advanced_edge_smoothing(
+                mesh, 
+                smoothing_iterations=iterations, 
+                preserve_features=True
+            )
+            
+            # Restore center vertex heights
+            for idx, z_val in original_centers.items():
+                smoothed_mesh.vertices[idx, 2] = z_val
+            
+            return smoothed_mesh
+        
         except Exception as e:
-            print(f"Smoothing failed: {e}")
+            print(f"Enhanced smoothing failed: {e}")
             return mesh
     
     def simple_smooth_mesh_with_center_protection(self, mesh, factor, center_vertices=None):
@@ -1238,6 +1389,8 @@ class Shape3DConverter:
             return mesh
 
 
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1247,9 +1400,12 @@ class MainWindow(QMainWindow):
         self.current_mesh = None
         self.shapes = None
         self.processed_image = None
+        self.original_image = None
         self.smoothing_factor = 0.0
         self.inflation_distribution = 0.0
-
+        self.dimensions = {'width': 100, 'height': 100, 'depth': 10}  # Default in mm
+        self.current_unit = 'mm'
+        
         self.init_ui()
 
     def init_ui(self):
@@ -1260,7 +1416,7 @@ class MainWindow(QMainWindow):
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         
-        # Back button at the top
+        # Back button
         self.back_button = QPushButton("← Back to Main Menu")
         self.back_button.setStyleSheet("""
             QPushButton {
@@ -1288,7 +1444,7 @@ class MainWindow(QMainWindow):
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setStyleSheet("QLabel { background-color: #f0f0f0; border: 2px dashed #aaa; }")
         
-        # Controls
+        # Image controls
         control_group = QGroupBox("Image Controls")
         control_layout = QVBoxLayout()
         
@@ -1313,52 +1469,85 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.export_button)
         control_group.setLayout(control_layout)
         
-        # 3D Options group
+        # Dimension controls
+        dimension_group = QGroupBox("Dimensions")
+        dimension_layout = QVBoxLayout()
+        
+        # Unit selection
+        unit_widget = QWidget()
+        unit_layout = QHBoxLayout(unit_widget)
+        unit_layout.setContentsMargins(0, 0, 0, 0)
+        unit_layout.addWidget(QLabel("Units:"))
+        self.unit_combo = QComboBox()
+        self.unit_combo.addItems(['mm', 'cm', 'm', 'in', 'ft'])
+        self.unit_combo.setCurrentText('mm')
+        self.unit_combo.currentTextChanged.connect(self.change_units)
+        unit_layout.addWidget(self.unit_combo)
+        dimension_layout.addWidget(unit_widget)
+        
+        # Width control
+        width_widget = QWidget()
+        width_layout = QHBoxLayout(width_widget)
+        width_layout.setContentsMargins(0, 0, 0, 0)
+        width_layout.addWidget(QLabel("Width:"))
+        self.width_spin = QDoubleSpinBox()
+        self.width_spin.setRange(0.1, 1000)
+        self.width_spin.setValue(100)
+        self.width_spin.setSuffix(" mm")
+        self.width_spin.valueChanged.connect(self.update_dimensions)
+        width_layout.addWidget(self.width_spin)
+        dimension_layout.addWidget(width_widget)
+        
+        # Height control
+        height_widget = QWidget()
+        height_layout = QHBoxLayout(height_widget)
+        height_layout.setContentsMargins(0, 0, 0, 0)
+        height_layout.addWidget(QLabel("Height:"))
+        self.height_spin = QDoubleSpinBox()
+        self.height_spin.setRange(0.1, 1000)
+        self.height_spin.setValue(100)
+        self.height_spin.setSuffix(" mm")
+        self.height_spin.valueChanged.connect(self.update_dimensions)
+        height_layout.addWidget(self.height_spin)
+        dimension_layout.addWidget(height_widget)
+        
+        # Depth control
+        depth_widget = QWidget()
+        depth_layout = QHBoxLayout(depth_widget)
+        depth_layout.setContentsMargins(0, 0, 0, 0)
+        depth_layout.addWidget(QLabel("Extrusion:"))
+        self.depth_spin = QDoubleSpinBox()
+        self.depth_spin.setRange(0.1, 1000)
+        self.depth_spin.setValue(10)
+        self.depth_spin.setSuffix(" mm")
+        self.depth_spin.valueChanged.connect(self.update_dimensions)
+        depth_layout.addWidget(self.depth_spin)
+        dimension_layout.addWidget(depth_widget)
+        
+        dimension_group.setLayout(dimension_layout)
+        
+        # 3D Options
         options_group = QGroupBox("3D Options")
         options_layout = QVBoxLayout()
         
-        # Mode selection (horizontal layout for the checkboxes)
+        # Mode selection
         mode_widget = QWidget()
         mode_layout = QHBoxLayout(mode_widget)
         mode_layout.setContentsMargins(0, 0, 0, 0)
         
-        # True 3D mode checkbox
-        self.true_3d_checkbox = QCheckBox("Sphere")
-        self.true_3d_checkbox.setToolTip("Convert to volumetric 3D models instead of extrusions")
+        self.true_3d_checkbox = QCheckBox("Sphere/Cube")
+        self.true_3d_checkbox.setToolTip("Convert to volumetric 3D models")
         self.true_3d_checkbox.stateChanged.connect(self.toggle_true_3d_mode)
         
-        # Heart 3D mode checkbox
-        self.heart_3d_checkbox = QCheckBox("Real Heart")
-        self.heart_3d_checkbox.setToolTip("Create anatomically-inspired 3D hearts")
-        self.heart_3d_checkbox.stateChanged.connect(self.toggle_heart_3d_mode)
-        
-        # Inflation checkbox - create it BEFORE trying to use it3333333333333333333333
         self.inflation_checkbox = QCheckBox("Inflate Shapes")
-        self.inflation_checkbox.setToolTip("Create rounded, inflated versions of shapes")
+        self.inflation_checkbox.setToolTip("Create rounded, inflated versions")
         self.inflation_checkbox.stateChanged.connect(self.toggle_inflation_mode)
         
         mode_layout.addWidget(self.true_3d_checkbox)
-        mode_layout.addWidget(self.heart_3d_checkbox)
         mode_layout.addWidget(self.inflation_checkbox)
         options_layout.addWidget(mode_widget)
         
-        # Height control
-        height_control = QWidget()
-        height_layout = QVBoxLayout(height_control)
-        height_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.height_slider = QSlider(Qt.Orientation.Horizontal)
-        self.height_slider.setRange(10, 200)
-        self.height_slider.setValue(50)
-        self.height_label = QLabel("Extrusion Height: 0.5")
-        
-        height_layout.addWidget(QLabel("Extrusion Strength:"))
-        height_layout.addWidget(self.height_slider)
-        height_layout.addWidget(self.height_label)
-        
-        options_layout.addWidget(height_control)
-        
-        # Inflation slider control - create it BEFORE trying to use it
+        # Inflation controls
         inflation_control = QWidget()
         inflation_layout = QVBoxLayout(inflation_control)
         inflation_layout.setContentsMargins(0, 0, 0, 0)
@@ -1366,50 +1555,61 @@ class MainWindow(QMainWindow):
         self.inflation_slider = QSlider(Qt.Orientation.Horizontal)
         self.inflation_slider.setRange(0, 100)
         self.inflation_slider.setValue(50)
-        self.inflation_slider.setEnabled(False)  # Initially disabled
+        self.inflation_slider.setEnabled(False)
         self.inflation_label = QLabel("Inflation: 50%")
         
         inflation_layout.addWidget(QLabel("Inflation Amount:"))
         inflation_layout.addWidget(self.inflation_slider)
         inflation_layout.addWidget(self.inflation_label)
-        
         options_layout.addWidget(inflation_control)
         
-        # Distribution slider control
+        # Distribution control
         distribution_control = QWidget()
         distribution_layout = QVBoxLayout(distribution_control)
         distribution_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.distribution_slider = QSlider(Qt.Orientation.Horizontal)
-        self.distribution_slider.setRange(0, 100)
-        self.distribution_slider.setValue(50)  # Start at middle point
-        self.distribution_slider.setEnabled(False)  # Initially disabled
-        self.distribution_label = QLabel("Inflation Distribution: 50%")
+        #self.distribution_slider = QSlider(Qt.Orientation.Horizontal)
+        #self.distribution_slider.setRange(0, 100)
+        #self.distribution_slider.setValue(50)
+        #self.distribution_slider.setEnabled(True)
+        #self.distribution_label = QLabel("Inflation Distribution: 50%")
         
-        options_layout.addWidget(distribution_control)
+        #distribution_layout.addWidget(QLabel("Inflation Distribution:"))
+        #distribution_layout.addWidget(self.distribution_slider)
+        #distribution_layout.addWidget(self.distribution_label)
+        #options_layout.addWidget(distribution_control)
+        
+        # Smoothing
+        #self.smoothing_checkbox = QCheckBox("Smooth Shapes")
+        #self.smoothing_checkbox.stateChanged.connect(self.toggle_smoothing)
+        #options_layout.addWidget(self.smoothing_checkbox)
+        
         options_group.setLayout(options_layout)
         
         left_layout.addWidget(self.image_label)
         left_layout.addWidget(control_group)
+        left_layout.addWidget(dimension_group)
         left_layout.addWidget(options_group)
         left_layout.addStretch()
         
-        # Right panel - 3D viewer
+        # 3D Viewer
         self.viewer = gl.GLViewWidget()
-        self.viewer.setCameraPosition(distance=3)
+        self.viewer.setCameraPosition(distance=1)
         grid = gl.GLGridItem()
-        grid.setSize(2, 2)
+        grid.setSize(1, 1)
+        grid.setSpacing(0.1, 0.1)
         self.viewer.addItem(grid)
         
         main_layout.addWidget(left_panel, 1)
         main_layout.addWidget(self.viewer, 2)
         self.setCentralWidget(main_widget)
-        
-        # Connect sliders - do this AFTER creating all widgets
-        self.height_slider.valueChanged.connect(self.update_height_and_model)
+
+        # Connect signals
         self.inflation_slider.valueChanged.connect(self.update_inflation)
-        self.distribution_slider.valueChanged.connect(self.update_distribution)
-        self.inflation_checkbox.stateChanged.connect(lambda state: self.distribution_slider.setEnabled(state == Qt.CheckState.Checked.value))
+        #self.distribution_slider.valueChanged.connect(self.update_distribution)
+        self.inflation_checkbox.stateChanged.connect(
+            lambda state: self.distribution_slider.setEnabled(state == Qt.CheckState.Checked)
+        )
 
     def go_back_to_landing_page(self):
         """Close this window and launch the landing page"""
@@ -1467,100 +1667,100 @@ class MainWindow(QMainWindow):
                 f"Failed to return to landing page: {str(e)}"
             )
 
-    def toggle_smoothing(self, state):
-        """Toggle smoothing on/off"""
-        is_enabled = state == Qt.CheckState.Checked.value
+    def change_units(self, unit):
+        """Handle unit system change"""
+        self.current_unit = unit
+        suffix = f" {unit}"
         
-        # Update smoothing factor based on checkbox
-        self.smoothing_factor = 0.5 if is_enabled else 0.0
-        self.converter.set_smoothing_factor(self.smoothing_factor)
+        # Update spin boxes
+        self.width_spin.setSuffix(suffix)
+        self.height_spin.setSuffix(suffix)
+        self.depth_spin.setSuffix(suffix)
         
-        # Update the model if shapes are already detected
+        # Convert values if needed
+        if unit == 'mm':
+            factor = 1.0
+        elif unit == 'cm':
+            factor = 0.1
+        elif unit == 'm':
+            factor = 0.001
+        elif unit == 'in':
+            factor = 1/25.4
+        elif unit == 'ft':
+            factor = 1/304.8
+            
+        # Convert current values
+        self.width_spin.setValue(self.width_spin.value() * factor)
+        self.height_spin.setValue(self.height_spin.value() * factor)
+        self.depth_spin.setValue(self.depth_spin.value() * factor)
+        
+        # Update model if we have one
         if self.shapes:
             self.update_3d_model()
 
-    def update_distribution(self, value):
-        """Update inflation distribution when slider changes"""
-        # Update label
-        self.distribution_label.setText(f"Inflation Distribution: {value}%")
+    def update_dimensions(self):
+        """Update dimension values when spin boxes change"""
+        self.dimensions = {
+            'width': self.width_spin.value(),
+            'height': self.height_spin.value(),
+            'depth': self.depth_spin.value()
+        }
         
-        # Notify the converter
-        # Values below 50 concentrate inflation at edges
-        # Values above 50 concentrate inflation at center
-        distribution_factor = (value - 50) / 50.0  # Range from -1.0 to 1.0
-        
-        self.converter.set_inflation_distribution(distribution_factor)
-        
-        # Update the model if shapes are already detected
         if self.shapes:
             self.update_3d_model()
 
-    def toggle_inflation_mode(self, state):
-        """Toggle inflation mode on/off"""
-        is_enabled = state == Qt.CheckState.Checked.value
-        self.converter.set_inflation_enabled(is_enabled)
-        self.inflation_slider.setEnabled(is_enabled)
+    def get_scale_factor(self):
+        """Calculate scale factor based on image dimensions and target size"""
+        if self.original_image is None:
+            return 1.0
+            
+        img_height, img_width = self.original_image.shape[:2]
+        width_scale = self.convert_to_mm(self.dimensions['width']) / img_width
+        height_scale = self.convert_to_mm(self.dimensions['height']) / img_height
         
-        # Update the model if shapes are already detected
-        if self.shapes:
-            self.update_3d_model()
+        return min(width_scale, height_scale)
 
-    def update_inflation(self, value):
-        """Update inflation factor when slider changes"""
-        factor = value / 100.0
-        self.inflation_label.setText(f"Inflation: {value}%")
-        self.converter.set_inflation_factor(factor)
-        
-        # Update the model if shapes are already detected
-        if self.shapes:
-            self.update_3d_model()
-            
-    def toggle_true_3d_mode(self, state):
-        """Toggle between standard extrusion and true 3D mode"""
-        is_3d_mode = state == Qt.CheckState.Checked.value
-        self.converter.set_true_3d_mode(is_3d_mode)
-        
-        # If enabling true 3D mode, uncheck heart 3D mode
-        if is_3d_mode:
-            self.heart_3d_checkbox.setChecked(False)
-            self.height_label.setText(f"Volume: {self.height_slider.value()/100:.2f}")
-        else:
-            self.height_label.setText(f"Extrusion Height: {self.height_slider.value()/100:.2f}")
-            
-        # Update the model if shapes are already detected
-        if self.shapes:
-            self.update_3d_model()
-            
-    def toggle_heart_3d_mode(self, state):
-        """Toggle between standard extrusion and heart 3D mode"""
-        is_heart_mode = state == Qt.CheckState.Checked.value
-        self.converter.set_heart_3d_mode(is_heart_mode)
-        
-        # If enabling heart 3D mode, uncheck true 3D mode
-        if is_heart_mode:
-            self.true_3d_checkbox.setChecked(False)
-            self.height_label.setText(f"Heart Detail: {self.height_slider.value()/100:.2f}")
-        else:
-            self.height_label.setText(f"Extrusion Height: {self.height_slider.value()/100:.2f}")
-            
-        # Update the model if shapes are already detected
-        if self.shapes:
-            self.update_3d_model()
-            
-    def update_height_and_model(self, value):
-        """Update the height label and the 3D model when slider changes"""
-        # Update label based on current mode
-        if self.true_3d_checkbox.isChecked():
-            self.height_label.setText(f"Volume: {value/100:.2f}")
-        elif self.heart_3d_checkbox.isChecked():
-            self.height_label.setText(f"Heart Detail: {value/100:.2f}")
-        else:
-            self.height_label.setText(f"Extrusion Height: {value/100:.2f}")
+    def convert_to_mm(self, value):
+        """Convert value from current unit to mm"""
+        if self.current_unit == 'mm':
+            return value
+        elif self.current_unit == 'cm':
+            return value * 10
+        elif self.current_unit == 'm':
+            return value * 1000
+        elif self.current_unit == 'in':
+            return value * 25.4
+        elif self.current_unit == 'ft':
+            return value * 304.8
+        return value
 
-        self.converter.set_extrusion_strength(value/100.0)
-        # Update 3D model if we have shapes
-        if self.shapes:
-            self.update_3d_model()
+    def update_3d_model(self):
+        """Update the 3D model using current settings"""
+        try:
+            if not self.shapes:
+                return
+                
+            scale_factor = self.get_scale_factor()
+            depth_mm = self.convert_to_mm(self.dimensions['depth'])
+            normalized_depth = depth_mm / (100 * scale_factor)
+            
+            self.current_mesh = self.converter.create_3d_mesh(
+                self.processed_image if self.processed_image is not None else self.original_image, 
+                self.shapes, 
+                normalized_depth
+            )
+            
+            if self.current_mesh is None:
+                QMessageBox.warning(self, "Error", "Failed to create 3D mesh")
+                return
+                
+            self.current_mesh.apply_scale(scale_factor)
+            self.display_mesh(self.current_mesh)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"3D conversion failed: {str(e)}")
+            import traceback
+            print(f"Error in update_3d_model: {traceback.format_exc()}")
 
     def load_image(self):
         file_name, _ = QFileDialog.getOpenFileName(
@@ -1624,32 +1824,76 @@ class MainWindow(QMainWindow):
             import traceback
             print(f"Error in detect_shapes_and_convert: {traceback.format_exc()}")
 
-    def update_3d_model(self):
-        """Update the 3D model using current height setting and detected shapes"""
-        try:
-            if not self.shapes:
-                return
-                
-            height_factor = self.height_slider.value() / 100.0
+    def toggle_smoothing(self, state):
+        """Toggle smoothing on/off"""
+        is_enabled = state == Qt.CheckState.Checked.value
+        
+        # Update smoothing factor based on checkbox
+        self.smoothing_factor = 0.5 if is_enabled else 0.0
+        self.converter.set_smoothing_factor(self.smoothing_factor)
+        
+        # Update the model if shapes are already detected
+        if self.shapes:
+            self.update_3d_model()
+
+    def update_distribution(self, value):
+        """Update inflation distribution when slider changes"""
+        # Map 0-100 to 0.1-2.0 for more noticeable effect
+        distribution_factor = 0.1 + (value / 100.0) * 1.9
+        self.distribution_label.setText(f"Inflation Distribution: {value}%")
+        self.converter.set_inflation_distribution(distribution_factor)
+        
+        if self.shapes:
+            self.update_3d_model()
+
+    def toggle_inflation_mode(self, state):
+        """Toggle inflation mode on/off"""
+        is_enabled = state == Qt.CheckState.Checked.value
+        self.converter.set_inflation_enabled(is_enabled)
+        self.inflation_slider.setEnabled(is_enabled)
+        
+        # Update the model if shapes are already detected
+        if self.shapes:
+            self.update_3d_model()
+
+    def update_inflation(self, value):
+        """Update inflation factor when slider changes"""
+        factor = value / 100.0
+        self.inflation_label.setText(f"Inflation: {value}%")
+        self.converter.set_inflation_factor(factor)
+        
+        # Update the model if shapes are already detected
+        if self.shapes:
+            self.update_3d_model()
             
-            # Create 3D mesh with current settings
-            self.current_mesh = self.converter.create_3d_mesh(
-                self.processed_image if self.processed_image is not None else self.original_image, 
-                self.shapes, 
-                height_factor
-            )
+    def toggle_true_3d_mode(self, state):
+        """Toggle between standard extrusion and true 3D mode"""
+        is_3d_mode = state == Qt.CheckState.Checked.value
+        self.converter.set_true_3d_mode(is_3d_mode)
+        
+        # Update label based on mode
+        if is_3d_mode:
+            self.height_label.setText(f"Volume: {self.height_slider.value()/100:.2f}")
+        else:
+            self.height_label.setText(f"Extrusion Height: {self.height_slider.value()/100:.2f}")
             
-            if self.current_mesh is None:
-                QMessageBox.warning(self, "Error", "Failed to create 3D mesh")
-                return
-                
-            # Display in 3D viewer
-            self.display_mesh(self.current_mesh)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"3D conversion failed: {str(e)}")
-            import traceback
-            print(f"Error in update_3d_model: {traceback.format_exc()}")
+        # Update the model if shapes are already detected
+        if self.shapes:
+            self.update_3d_model()
+
+    def update_height_and_model(self, value):
+        """Update the height label and the 3D model when slider changes"""
+        # Update label based on current mode
+        if self.true_3d_checkbox.isChecked():
+            self.height_label.setText(f"Volume: {value/100:.2f}")
+        else:
+            self.height_label.setText(f"Extrusion Height: {value/100:.2f}")
+
+        self.converter.set_extrusion_strength(value/100.0)
+        
+        # Update 3D model if we have shapes
+        if self.shapes:
+            self.update_3d_model()
 
     def display_mesh(self, mesh):
         """Display mesh with realistic rendering and clean grid"""
@@ -1662,16 +1906,13 @@ class MainWindow(QMainWindow):
             # Get colors from mesh
             if hasattr(mesh.visual, 'face_colors'):
                 colors = mesh.visual.face_colors
-                # If colors are in 0-255 range, normalize to 0-1
                 if colors.max() > 1.0:
                     colors = colors.astype(np.float32) / 255.0
             else:
-                # Create default colors if none exist
                 colors = np.ones((len(faces), 4)) * [0.5, 0.5, 0.5, 1.0]
             
             # Enhance colors for more realistic appearance
             enhanced_colors = colors.copy()
-            # Add slight specular highlight to make it look more 3D
             enhanced_colors[:, 0:3] = np.clip(enhanced_colors[:, 0:3] * 1.2, 0, 1)
                 
             # Create the mesh item with improved rendering settings
@@ -1679,10 +1920,10 @@ class MainWindow(QMainWindow):
                 vertexes=vertices,
                 faces=faces,
                 faceColors=enhanced_colors,
-                smooth=True,  # Enable smooth shading
-                shader='shaded',  # Use shaded rendering mode for more realism
-                glOptions='opaque',  # Opaque rendering for better depth perception
-                drawEdges=False)  # No edges for smoother appearance
+                smooth=True,
+                shader='shaded',
+                glOptions='opaque',
+                drawEdges=False)
                 
             self.viewer.addItem(mesh_item)
             
@@ -1691,30 +1932,30 @@ class MainWindow(QMainWindow):
             
             # Add a more detailed grid for better spatial reference
             grid = gl.GLGridItem()
-            # Make grid larger than the object
             x_min, y_min, _ = np.min(vertices, axis=0)
             x_max, y_max, _ = np.max(vertices, axis=0)
-            grid_size = max(abs(x_max - x_min), abs(y_max - y_min)) * 3.0  # Larger grid
+            grid_size = max(abs(x_max - x_min), abs(y_max - y_min)) * 3.0
             grid.setSize(grid_size, grid_size)
-            grid.setSpacing(grid_size/20, grid_size/20)  # More grid lines for better reference
-            grid.translate(0, 0, z_min - 0.02)  # Place just below the object
-            
-            # Set grid to a subtle light gray (more visible but not distracting)
+            grid.setSpacing(grid_size/20, grid_size/20)
+            grid.translate(0, 0, z_min - 0.02)
             grid.setColor((0.8, 0.8, 0.8, 0.7))
-            
-            # Add the grid to the scene
             self.viewer.addItem(grid)
             
+            mesh_size = np.max(np.ptp(vertices, axis=0))
+            camera_distance = max(1.0, mesh_size * 1.5)
             # Set up good lighting with optimal camera position
-            self.viewer.opts['distance'] = 3.5  # Adjust camera distance
-            self.viewer.opts['elevation'] = 30  # View from above
-            self.viewer.opts['azimuth'] = 45    # Angle from side
+            self.viewer.opts['distance'] = camera_distance
+            self.viewer.opts['elevation'] = 30
+            self.viewer.opts['azimuth'] = 45
+
+            grid_size = max(1.0, mesh_size * 1.2)
+            grid.setSize(grid_size, grid_size)
+            grid.setSpacing(grid_size/20, grid_size/20)
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to display mesh: {str(e)}")
             print(f"Error in display_mesh: {e}")
             
-        # Force the viewer to update with the new rendering settings
         self.viewer.update()
 
     def export_mesh(self):
