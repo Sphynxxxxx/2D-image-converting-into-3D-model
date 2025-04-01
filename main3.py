@@ -2159,7 +2159,7 @@ class MainWindow(QMainWindow):
                             grayscale * 0.7,
                             grayscale * 0.7,
                             grayscale * 0.7,
-                            np.ones(len(grayscale))  # Alpha
+                            np.ones(len(grayscale)) 
                         ])
                 else:
                     # Default to medium gray with lighting
