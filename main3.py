@@ -12,7 +12,8 @@ import importlib.util
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QPushButton, QLabel, QFileDialog, QMessageBox, QGroupBox, QComboBox,
-                           QSlider, QDoubleSpinBox, QFormLayout, QCheckBox, QProgressBar)
+                           QSlider, QDoubleSpinBox, QFormLayout, QCheckBox, QProgressBar,
+                           QScrollArea, QSizePolicy, QFrame) 
 from PyQt6.QtGui import QPixmap, QImage, QCursor, QFont, QIcon  
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 import pyqtgraph.opengl as gl
@@ -396,12 +397,14 @@ class EnhancedMeshGenerator(QThread):
         # Apply mask to depth map
         depth_map = depth_map * (shape_mask > 0).astype(float)
         
-        # Enhanced smoothing of the depth map for better 3D appearance
-        # Use guided filter which preserves edges better than bilateral filter
-        if shape_mask.any():
-            # Create a guidance image from the original for better edge preservation
-            guide = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            depth_map = cv2.ximgproc.guidedFilter(guide, depth_map, 5, 0.01)
+        # Convert image to grayscale for color handling
+        if image.shape[2] == 4:  # If BGRA
+            gray_image = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+        else:  # If BGR
+            gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Normalize grayscale image
+        gray_image = gray_image.astype(np.float32) / 255.0
         
         # Create vertices only for the masked region
         height, width = depth_map.shape
@@ -491,13 +494,11 @@ class EnhancedMeshGenerator(QThread):
                             faces.extend([[v1, v2, v3], [v2, v4, v3]])
                         
                         # Calculate color based on image with enhanced depth effect
-                        base_color = image[i,j][:3] / 255.0  # Use only RGB channels
+                        gray_value = gray_image[i,j]
                         depth_factor = depth_map[i,j]
                         
-                        # Enhanced color depth effect
-                        ambient = 0.3  # Ambient light factor
-                        diffuse = 0.7  # Diffuse light factor
-                        color = base_color * (ambient + diffuse * depth_factor)
+
+                        color = np.array([gray_value, gray_value, gray_value]) * (0.7 + 0.3 * depth_factor)
                         
                         # Add the two triangle colors
                         colors.extend([color, color])
@@ -1447,23 +1448,7 @@ class MainWindow(QMainWindow):
         basic_layout.setContentsMargins(0, 0, 0, 0)
         basic_layout.setSpacing(10)
         
-        # Depth strength slider
-        self.depth_slider = QSlider(Qt.Orientation.Horizontal)
-        self.depth_slider.setMinimum(10)
-        self.depth_slider.setMaximum(300)
-        self.depth_slider.setValue(100)
-        self.depth_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.depth_slider.setTickInterval(50)
-        
-        # Extrusion depth slider
-        self.extrusion_slider = QSlider(Qt.Orientation.Horizontal)
-        self.extrusion_slider.setMinimum(10)
-        self.extrusion_slider.setMaximum(200)
-        self.extrusion_slider.setValue(50)
-        self.extrusion_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.extrusion_slider.setTickInterval(25)
-        
-        # Add solid base checkbox
+        # Create checkboxes first so they're available for later use
         self.add_base_checkbox = QCheckBox("Create Solid 3D Object")
         self.add_base_checkbox.setChecked(True)
         
@@ -1476,9 +1461,51 @@ class MainWindow(QMainWindow):
         self.invert_depth_label = QLabel("• Checked: Text and details pop up\n• Unchecked: Outlines and borders pop up")
         self.invert_depth_label.setStyleSheet("color: #999999; font-size: 9px; margin-left: 25px;")
         
+        # Depth strength slider with percentage display
+        depth_slider_layout = QHBoxLayout()
+        
+        self.depth_slider = QSlider(Qt.Orientation.Horizontal)
+        self.depth_slider.setMinimum(10)
+        self.depth_slider.setMaximum(300)
+        self.depth_slider.setValue(100)
+        self.depth_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.depth_slider.setTickInterval(50)
+        
+        # Add percentage label for depth slider
+        self.depth_percentage_label = QLabel("100%")
+        self.depth_percentage_label.setStyleSheet("min-width: 40px; color: #cccccc;")
+        self.depth_percentage_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        
+        # Connect slider value change to update percentage label
+        self.depth_slider.valueChanged.connect(lambda value: self.depth_percentage_label.setText(f"{value}%"))
+        
+        depth_slider_layout.addWidget(self.depth_slider)
+        depth_slider_layout.addWidget(self.depth_percentage_label)
+        
+        # Extrusion depth slider with percentage display
+        extrusion_slider_layout = QHBoxLayout()
+        
+        self.extrusion_slider = QSlider(Qt.Orientation.Horizontal)
+        self.extrusion_slider.setMinimum(10)
+        self.extrusion_slider.setMaximum(200)
+        self.extrusion_slider.setValue(50)
+        self.extrusion_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.extrusion_slider.setTickInterval(25)
+        
+        # Add percentage label for extrusion slider
+        self.extrusion_percentage_label = QLabel("50%")
+        self.extrusion_percentage_label.setStyleSheet("min-width: 40px; color: #cccccc;")
+        self.extrusion_percentage_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        
+        # Connect slider value change to update percentage label
+        self.extrusion_slider.valueChanged.connect(lambda value: self.extrusion_percentage_label.setText(f"{value}%"))
+        
+        extrusion_slider_layout.addWidget(self.extrusion_slider)
+        extrusion_slider_layout.addWidget(self.extrusion_percentage_label)
+        
         # Add to basic layout
-        basic_layout.addRow("Depth Strength:", self.depth_slider)
-        basic_layout.addRow("Extrusion Depth:", self.extrusion_slider)
+        basic_layout.addRow("Strength:", depth_slider_layout)
+        basic_layout.addRow("Extrusion:", extrusion_slider_layout)
         basic_layout.addRow("", self.add_base_checkbox)
         basic_layout.addRow("", self.invert_depth_checkbox)
         basic_layout.addRow("", self.invert_depth_label)
@@ -2070,8 +2097,7 @@ class MainWindow(QMainWindow):
             self.convert_button.setText("🔄 Generate 3D Model")
 
     def display_mesh(self, vertices, faces, colors):
-        """Display the 3D mesh with enhanced rendering and proper centering"""
-        # Import QtGui for QVector3D
+        """Display the 3D mesh with grayscale rendering and proper centering"""
         from PyQt6 import QtGui
         
         self.viewer.clear()
@@ -2092,23 +2118,75 @@ class MainWindow(QMainWindow):
                 # Center the vertices by subtracting the center point
                 centered_vertices = vertices - center
                 
-                # Create colors if missing
-                if len(colors) != len(faces) or colors.shape[1] != 3:
-                    colors = np.ones((len(faces), 4), dtype=np.float32) * [0.7, 0.7, 0.7, 1.0]
+                # Convert colors to grayscale with proper lighting
+                if len(colors) > 0:
+                    # Ensure colors are in the correct shape
+                    if colors.ndim == 1:
+                        colors = colors.reshape(-1, 3)
+                    
+                    # Convert RGB to grayscale using standard luminance formula
+                    if colors.shape[1] >= 3:
+                        grayscale = (0.299 * colors[:,0] + 0.587 * colors[:,1] + 0.114 * colors[:,2]) * 1.2  # 20% brighter
+                        grayscale = np.clip(grayscale, 0, 1) 
+                    else:
+                        grayscale = np.ones(len(colors)) * 0.7
+                    
+                    # Apply lighting effect based on vertex Z position
+                    z_values = centered_vertices[:,2]
+                    z_min, z_max = z_values.min(), z_values.max()
+                    if z_max != z_min:
+                        lighting_factor = 0.7 + 0.3 * (z_values - z_min) / (z_max - z_min)
+                    else:
+                        lighting_factor = np.ones(len(z_values)) * 0.7
+                    
+                    # Create face colors by averaging vertex colors
+                    if len(grayscale) == len(vertices):  # Vertex colors
+                        # For each face, average the colors of its vertices
+                        face_colors = []
+                        for face in faces:
+                            if len(face) >= 3:  # Need at least 3 vertices per face
+                                face_grayscale = np.mean(grayscale[face[:3]])
+                                face_lighting = np.mean(lighting_factor[face[:3]])
+                                face_colors.append([
+                                    face_grayscale * face_lighting,
+                                    face_grayscale * face_lighting,
+                                    face_grayscale * face_lighting,
+                                    1.0  # Alpha
+                                ])
+                        grayscale_colors = np.array(face_colors)
+                    else:  # Assume face colors
+                        grayscale_colors = np.column_stack([
+                            grayscale * 0.7,
+                            grayscale * 0.7,
+                            grayscale * 0.7,
+                            np.ones(len(grayscale))  # Alpha
+                        ])
                 else:
-                    # Convert RGB to RGBA
-                    alpha = np.ones((len(colors), 1), dtype=np.float32)
-                    colors = np.hstack([colors, alpha]).astype(np.float32)
+                    # Default to medium gray with lighting
+                    z_values = centered_vertices[:,2]
+                    z_min, z_max = z_values.min(), z_values.max()
+                    if z_max != z_min:
+                        lighting_factor = 0.5 + 0.5 * (z_values - z_min) / (z_max - z_min)
+                    else:
+                        lighting_factor = np.ones(len(z_values)) * 0.7
+                    
+                    # Create uniform gray colors for all faces
+                    grayscale_colors = np.column_stack([
+                        lighting_factor * 0.85,
+                        lighting_factor * 0.85,
+                        lighting_factor * 0.85,
+                        np.ones(len(faces))  # Alpha
+                    ])
 
-                # Create mesh with enhanced parameters and centered vertices
+                # Create mesh with grayscale colors and lighting
                 self.mesh_item = gl.GLMeshItem(
                     vertexes=centered_vertices,
                     faces=faces,
-                    faceColors=colors,
-                    smooth=True,  # Enable smooth shading
-                    computeNormals=True,  # Compute normals for better lighting
-                    drawEdges=False,  # Hide edges for smoother appearance
-                    shader='shaded'  # Use shaded rendering for better 3D effect
+                    faceColors=grayscale_colors,
+                    smooth=True,
+                    computeNormals=True,
+                    drawEdges=False,
+                    shader='shaded'
                 )
                 
                 # Add reference grid
