@@ -1,5 +1,6 @@
 import sys
 import cv2
+import os
 import numpy as np
 import trimesh
 from PIL import Image
@@ -9,7 +10,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QPushButton, QLabel, QFileDialog, QMessageBox, QSlider, QCheckBox,
                            QGroupBox, QSizePolicy, QComboBox, QDoubleSpinBox)
-from PyQt6.QtGui import QPixmap, QImage, QCursor, QFont
+from PyQt6.QtGui import QPixmap, QImage, QCursor, QFont, QIcon  
 import pyqtgraph.opengl as gl
 
 class Shape3DConverter:
@@ -1405,6 +1406,26 @@ class MainWindow(QMainWindow):
         self.dimensions = {'width': 100, 'height': 100, 'depth': 10}  # Default in mm
         self.current_unit = 'mm'
         
+        app_icon = QIcon()
+        icon_path = "logo/OneUp logo-02.png"
+        if os.path.exists(icon_path):
+            app_icon.addFile(icon_path)
+            self.setWindowIcon(app_icon)
+        else:
+            print(f"Warning: Icon file not found at {icon_path}")
+            
+        self.setWindowTitle("2D to 3D Shape Converter")
+        self.converter = Shape3DConverter()
+        self.current_mesh = None
+        self.shapes = None
+        self.processed_image = None
+        self.original_image = None
+        self.smoothing_factor = 0.0
+        self.inflation_distribution = 0.0
+        self.dimensions = {'width': 100, 'height': 100, 'depth': 10}  # Default in mm
+        self.current_unit = 'mm'
+        
+        
         self.init_ui()
 
     def init_ui(self):
@@ -1538,12 +1559,12 @@ class MainWindow(QMainWindow):
         self.true_3d_checkbox.setToolTip("Convert to volumetric 3D models")
         self.true_3d_checkbox.stateChanged.connect(self.toggle_true_3d_mode)
         
-        self.inflation_checkbox = QCheckBox("Inflate Shapes")
-        self.inflation_checkbox.setToolTip("Create rounded, inflated versions")
-        self.inflation_checkbox.stateChanged.connect(self.toggle_inflation_mode)
+        #self.inflation_checkbox = QCheckBox("Inflate Shapes")
+        #self.inflation_checkbox.setToolTip("Create rounded, inflated versions")
+        #self.inflation_checkbox.stateChanged.connect(self.toggle_inflation_mode)
         
         mode_layout.addWidget(self.true_3d_checkbox)
-        mode_layout.addWidget(self.inflation_checkbox)
+        #mode_layout.addWidget(self.inflation_checkbox)
         options_layout.addWidget(mode_widget)
         
         # Inflation controls
@@ -1557,10 +1578,10 @@ class MainWindow(QMainWindow):
         self.inflation_slider.setEnabled(False)
         self.inflation_label = QLabel("Inflation: 50%")
         
-        inflation_layout.addWidget(QLabel("Inflation Amount:"))
-        inflation_layout.addWidget(self.inflation_slider)
-        inflation_layout.addWidget(self.inflation_label)
-        options_layout.addWidget(inflation_control)
+        #inflation_layout.addWidget(QLabel("Inflation Amount:"))
+        #inflation_layout.addWidget(self.inflation_slider)
+        #inflation_layout.addWidget(self.inflation_label)
+        #options_layout.addWidget(inflation_control)
         
         # Distribution control
         distribution_control = QWidget()
@@ -1604,11 +1625,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
 
         # Connect signals
-        self.inflation_slider.valueChanged.connect(self.update_inflation)
+        #self.inflation_slider.valueChanged.connect(self.update_inflation)
         #self.distribution_slider.valueChanged.connect(self.update_distribution)
-        self.inflation_checkbox.stateChanged.connect(
-            lambda state: self.distribution_slider.setEnabled(state == Qt.CheckState.Checked)
-        )
+        #self.inflation_checkbox.stateChanged.connect(
+        #    lambda state: self.distribution_slider.setEnabled(state == Qt.CheckState.Checked)
+        #)
 
     
 
@@ -1989,10 +2010,16 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    
+    app_icon = QIcon()
+    icon_path = "logo/OneUp logo-02.png"
+    if os.path.exists(icon_path):
+        app_icon.addFile(icon_path)
+        app.setWindowIcon(app_icon)
+    
     window = MainWindow()
     window.showMaximized()
     sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
-        

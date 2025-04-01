@@ -13,7 +13,7 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QPushButton, QLabel, QFileDialog, QMessageBox, QGroupBox, QComboBox,
                            QSlider, QDoubleSpinBox, QFormLayout, QCheckBox, QProgressBar)
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtGui import QPixmap, QImage, QCursor, QFont, QIcon  
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 import pyqtgraph.opengl as gl
 
@@ -1057,7 +1057,24 @@ class MainWindow(QMainWindow):
             }
         """)
         
-        # Initialize the rest of the UI and components
+        app_icon = QIcon()
+        icon_path = "logo/OneUp logo-02.png"
+        if os.path.exists(icon_path):
+            app_icon.addFile(icon_path)
+            self.setWindowIcon(app_icon)
+        else:
+            print(f"Warning: Icon file not found at {icon_path}")
+            
+        self.setWindowTitle("2D to 3D Object Converter")
+        self.current_mesh = None
+        self.shapes = None
+        self.processed_image = None
+        self.original_image = None
+        self.smoothing_factor = 0.0
+        self.inflation_distribution = 0.0
+        self.dimensions = {'width': 100, 'height': 100, 'depth': 10}  
+        self.current_unit = 'mm'
+
         self.init_bg_removal()
         self.init_ui()
         
@@ -2210,10 +2227,16 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    
+    app_icon = QIcon()
+    icon_path = "logo/OneUp logo-02.png"
+    if os.path.exists(icon_path):
+        app_icon.addFile(icon_path)
+        app.setWindowIcon(app_icon)
+    
     window = MainWindow()
     window.showMaximized()
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()

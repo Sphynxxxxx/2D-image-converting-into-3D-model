@@ -369,7 +369,6 @@ class LandingPage(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     
-    # Set application icon globally
     app_icon = QIcon()
     icon_path = "logo/OneUp logo-02.png"
     if os.path.exists(icon_path):
