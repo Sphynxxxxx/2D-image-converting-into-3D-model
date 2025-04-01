@@ -45,9 +45,15 @@ class CardWidget(QFrame):
                 Qt.TransformationMode.SmoothTransformation
             ))
         else:
-            # Use placeholder color if image not found
-            self.image_label.setText("📷")
-            self.image_label.setFont(QFont("Arial", 36))
+            # Use empty area if image not found
+            self.image_label.setText("")
+            self.image_label.setStyleSheet("""
+                QLabel {
+                    background-color: #2d2d2d;
+                    border-top-left-radius: 12px;
+                    border-top-right-radius: 12px;
+                }
+            """)
         
         # Title
         title_label = QLabel(title)
@@ -109,6 +115,16 @@ class CardWidget(QFrame):
 class LandingPage(QMainWindow):
     def __init__(self):
         super().__init__()
+        
+        # Set window icon
+        app_icon = QIcon()
+        icon_path = "logo/OneUp logo-02.png"
+        if os.path.exists(icon_path):
+            app_icon.addFile(icon_path)
+            self.setWindowIcon(app_icon)
+        else:
+            print(f"Warning: Icon file not found at {icon_path}")
+        
         self.setWindowTitle("OneUp: Converting 2D Images Into 3D Models")
         self.setGeometry(100, 100, 1100, 800)
         self.setMinimumSize(900, 700)
@@ -121,7 +137,7 @@ class LandingPage(QMainWindow):
                 color: white;
             }
             QLabel#app-title {
-                font-size: 28px;
+                font-size: 50px;
                 font-weight: bold;
                 color: white;
             }
@@ -140,7 +156,7 @@ class LandingPage(QMainWindow):
             }
             QFrame#divider {
                 border: 1px solid #333;
-                margin: 20px 0;
+                margin: 10px 0;
             }
         """)
         
@@ -148,48 +164,84 @@ class LandingPage(QMainWindow):
         self.setCentralWidget(self.central_widget)
         
         main_layout = QVBoxLayout(self.central_widget)
-        main_layout.setSpacing(30)
+        main_layout.setSpacing(5)
         main_layout.setContentsMargins(40, 40, 40, 40)
         
-        # Header with logo and title
-        header_layout = QHBoxLayout()
-        
+        # Header with logo and title (centered)
+        header_layout = QVBoxLayout()  # Changed to vertical layout for stacking
+        header_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_layout.setSpacing(20)
+
+        # Logo and title in horizontal layout
+        logo_title_layout = QHBoxLayout()
+        logo_title_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_title_layout.setSpacing(15)
+
         # Logo area
         logo_frame = QFrame()
         logo_frame.setFixedSize(90, 90)
         logo_frame.setStyleSheet("""
-            background-color: black;
+            background-color: transparent;
             border-radius: 10px;
         """)
-        
+
         logo_layout = QVBoxLayout(logo_frame)
-        logo_label = QLabel("OneUp")
-        logo_label.setFont(QFont("Arial", 15, QFont.Weight.Bold))
-        logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo_layout.addWidget(logo_label)
-        
+        logo_layout.setContentsMargins(0, 0, 0, 0)
+        logo_layout.setSpacing(0)  # Reduce spacing between logo and text
+
+        # Create an image label for the logo
+        logo_image = QLabel()
+        logo_path = "logo/OneUp logo-02.png"
+        if os.path.exists(logo_path):
+            pixmap = QPixmap(logo_path)
+            logo_image.setPixmap(pixmap.scaled(
+                90, 90,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+        else:
+            # If image not found, create a colored icon with text
+            logo_image.setText("3D")
+            logo_image.setStyleSheet("""
+                background-color: black;
+                color: white;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 24px;
+            """)
+            logo_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        logo_layout.addWidget(logo_image)
+
         # Title area
         title_layout = QVBoxLayout()
         title_layout.setSpacing(5)
-        
+        title_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
         title_label = QLabel("OneUp")
         title_label.setObjectName("app-title")
-        
+
         subtitle_label = QLabel("Converting 2D Images into 3D Models")
         subtitle_label.setObjectName("app-subtitle")
-        
+
         title_layout.addWidget(title_label)
         title_layout.addWidget(subtitle_label)
-        
-        header_layout.addWidget(logo_frame)
-        header_layout.addSpacing(15)
-        header_layout.addLayout(title_layout)
-        header_layout.addStretch()
-        
-        # Hero section
+
+        # Add logo and title to horizontal layout
+        logo_title_layout.addWidget(logo_frame)
+        logo_title_layout.addLayout(title_layout)
+
+        # Add the horizontal layout to the main header layout
+        header_layout.addLayout(logo_title_layout)
+
+        # Hero section (now part of the header section)
         hero_label = QLabel("Transform 2D Images into 3D Models")
         hero_label.setObjectName("section-title")
         hero_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero_label.setStyleSheet("font-size: 50px; font-weight: bold; color: white;")
+
+        # Add hero label to header layout
+        header_layout.addWidget(hero_label)
         
         description_label = QLabel("")
         description_label.setObjectName("description")
@@ -210,7 +262,7 @@ class LandingPage(QMainWindow):
         shape_card = CardWidget(
             "3D Shape Converter",
             "Convert 2D shapes to 3D models",
-            "shape.png",
+            "logo/shape.png",
             "Open Shape Converter",
             "#3498db"
         )
@@ -219,7 +271,7 @@ class LandingPage(QMainWindow):
         object_card = CardWidget(
             "3D Object Converter",
             "Convert 2D objects to 3D models",
-            "object.png",
+            "logo/object.png",
             "Open Object Converter",
             "#2ecc71"
         )
@@ -237,9 +289,7 @@ class LandingPage(QMainWindow):
         footer_label.setStyleSheet("color: #95a5a6; margin-top: 20px;")
         
         # Add all sections to main layout
-        main_layout.addLayout(header_layout)
-        main_layout.addSpacing(20)
-        main_layout.addWidget(hero_label)
+        main_layout.addLayout(header_layout)  # This now includes both the title and hero sections
         main_layout.addWidget(description_label, 0, Qt.AlignmentFlag.AlignHCenter)
         main_layout.addWidget(divider)
         main_layout.addSpacing(20)
@@ -318,6 +368,14 @@ class LandingPage(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    
+    # Set application icon globally
+    app_icon = QIcon()
+    icon_path = "logo/OneUp logo-02.png"
+    if os.path.exists(icon_path):
+        app_icon.addFile(icon_path)
+        app.setWindowIcon(app_icon)
+    
     window = LandingPage()
     window.showMaximized()
     sys.exit(app.exec())
