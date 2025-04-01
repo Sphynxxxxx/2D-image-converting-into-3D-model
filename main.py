@@ -1771,9 +1771,9 @@ class MainWindow(QMainWindow):
         
         # Image display
         self.image_label = QLabel("No image selected")
-        self.image_label.setFixedSize(400, 400)
+        self.image_label.setFixedSize(500, 500)
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setStyleSheet("QLabel { background-color: #f0f0f0; border: 2px dashed #aaa; }")
+        self.image_label.setStyleSheet("QLabel { background-color: gray; border: 2px dashed #aaa; }")
         
         # Image controls
         control_group = QGroupBox("Image Controls")
@@ -1963,7 +1963,6 @@ class MainWindow(QMainWindow):
 
     def toggle_star_mode(self, state):
         """Toggle star mode for star shapes"""
-        # In PyQt6, CheckState is an enum, need to compare with its value
         is_enabled = state == Qt.CheckState.Checked.value
         print(f"Star mode toggled: {is_enabled}")
         
@@ -1975,6 +1974,9 @@ class MainWindow(QMainWindow):
             if has_star:
                 print("Star shape found, updating 3D model...")
                 self.update_3d_model()
+            else:
+                print("No star shapes found, not updating model")
+                # Optional: Notify user that star mode won't affect the current shape
 
     def toggle_diamond_mode(self, state):
         """Toggle diamond mode for quadrilaterals"""

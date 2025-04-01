@@ -58,8 +58,6 @@ class EnhancedMeshGenerator(QThread):
         self.real_dimensions = real_dimensions  # (width, height, depth) in mm
 
     def estimate_depth(self, image, contour_mask, invert_depth=True):
-        """Advanced depth estimation with option for inverted or regular depth"""
-        # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
         # Ensure proper data types
@@ -707,6 +705,7 @@ class EnhancedMeshGenerator(QThread):
             return mesh, mesh.vertices, mesh.faces, np.array(colors)
         else:
             return None, vertices, np.array([], dtype=np.uint32), np.array([], dtype=np.float32)
+        
     def run(self):
         try:
             # Use the improved 3D mesh generation method
