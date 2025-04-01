@@ -26,6 +26,17 @@ class Shape3DConverter:
         self.corner_radius = 0.0
         self.scale_factor = 1.0 
         self.unit = 'mm'
+        self.pyramid_mode = False
+        self.diamond_mode = False
+        self.star_mode = False  
+
+    def set_star_mode(self, enabled):
+        """Enable or disable star mode for star shapes"""
+        self.star_mode = enabled
+
+    def set_diamond_mode(self, enabled):
+        """Enable or disable diamond mode for quadrilaterals"""
+        self.diamond_mode = enabled
 
     def set_scale_factor(self, factor):
         """Set the scale factor for metric conversion"""
@@ -46,6 +57,9 @@ class Shape3DConverter:
         elif unit == 'ft':
             self.scale_factor = 304.8
 
+    def set_pyramid_mode(self, enabled):
+        """Enable or disable pyramid mode for triangles"""
+        self.pyramid_mode = enabled
 
     def set_corner_radius(self, radius):
         """Set the corner radius for mesh generation"""
@@ -301,19 +315,56 @@ class Shape3DConverter:
                     
                     color = self.get_contour_color(contour, image)
                     
+                    # First check for triangles with a more precise epsilon
+                    epsilon = 0.02 * cv2.arcLength(contour, True)
+                    approx = cv2.approxPolyDP(contour, epsilon, True)
+                    
+                    # Triangle detection (3 vertices)
+                    if len(approx) == 3:
+                        triangle_points = np.array([point[0] for point in approx])
+                        
+                        # Calculate angles to distinguish from other 3-point shapes
+                        vectors = [
+                            triangle_points[1] - triangle_points[0],
+                            triangle_points[2] - triangle_points[1],
+                            triangle_points[0] - triangle_points[2]
+                        ]
+                        
+                        # Normalize vectors
+                        norms = [np.linalg.norm(v) for v in vectors]
+                        if all(n > 0 for n in norms):
+                            vectors = [v/n for v,n in zip(vectors, norms)]
+                            
+                            # Calculate angles
+                            angles = [
+                                np.degrees(np.arccos(np.clip(-np.dot(vectors[0], vectors[2]), -1, 1))),
+                                np.degrees(np.arccos(np.clip(-np.dot(vectors[1], vectors[0]), -1, 1))),
+                                np.degrees(np.arccos(np.clip(-np.dot(vectors[2], vectors[1]), -1, 1)))
+                            ]
+                            
+                            # Valid triangle should have angles summing to ~180 degrees
+                            if 160 < sum(angles) < 200:
+                                shapes.append(('triangle', [point[0] for point in approx], color))
+                                continue
+                    
+                    # Get enclosing circle for shape classification
                     (x, y), radius = cv2.minEnclosingCircle(contour)
                     area = cv2.contourArea(contour)
                     circle_area = math.pi * (radius ** 2)
+                    area_ratio = area / circle_area
                     
-                    if area / circle_area > 0.85:
+                    # Circle detection
+                    if area_ratio > 0.85:
                         shapes.append(('circle', (x, y, radius), color))
                         continue
                     
+                    # Fraction detection
                     if self.is_fraction(contour, image):
                         shapes.append(('fraction', contour.squeeze(), color))
                         continue
                     
-                    if 0.3 < area / circle_area < 0.95:
+                    # Star detection - improved logic
+                    if 0.3 < area_ratio < 0.95:
                         hull = cv2.convexHull(contour, returnPoints=False)
                         if len(hull) > 3:
                             defects = cv2.convexityDefects(contour, hull)
@@ -321,20 +372,42 @@ class Shape3DConverter:
                                 significant_defects = sum(1 for i in range(defects.shape[0]) 
                                     if defects[i,0,3]/256.0 > 1.0)
                                 if significant_defects >= 3:
+                                    # For better star geometry, create a more uniform star from the contour
+                                    M = cv2.moments(contour)
+                                    if M["m00"] != 0:
+                                        cx = int(M["m10"] / M["m00"])
+                                        cy = int(M["m01"] / M["m00"])
+                                    else:
+                                        x, y, w, h = cv2.boundingRect(contour)
+                                        cx, cy = x + w // 2, y + h // 2
+                                    
+                                    # Create a cleaner star shape for better 3D rendering
                                     shapes.append(('star', contour.squeeze(), color))
                                     continue
                     
+                    # Heart detection
                     if self.is_heart_shape(contour, image):
                         shapes.append(('heart', contour.squeeze(), color))
                         continue
                     
-                    epsilon = 0.01 * cv2.arcLength(contour, True)
+                    # Polygon classification with relaxed epsilon
+                    epsilon = 0.04 * cv2.arcLength(contour, True)
                     approx = cv2.approxPolyDP(contour, epsilon, True)
+                    vertices = [point[0] for point in approx]
+                    
+                    # Quadrilateral classification (4 sides)
                     if len(approx) == 4:
-                        rect_points = [point[0] for point in approx]
-                        rect_points = np.array(rect_points, dtype=np.float32)
-                        is_rectangle = True
+                        rect_points = np.array(vertices, dtype=np.float32)
                         
+                        # Calculate all side lengths
+                        side_lengths = []
+                        for i in range(4):
+                            p1 = rect_points[i]
+                            p2 = rect_points[(i+1)%4]
+                            side_lengths.append(np.linalg.norm(p2 - p1))
+                        
+                        # Calculate all angles
+                        angles = []
                         for i in range(4):
                             p1 = rect_points[i]
                             p2 = rect_points[(i+1)%4]
@@ -345,18 +418,27 @@ class Shape3DConverter:
                             
                             dot = np.dot(v1, v2)
                             norm = np.linalg.norm(v1) * np.linalg.norm(v2)
-                            
                             if norm > 0:
                                 angle = np.degrees(np.arccos(max(min(dot/norm, 1), -1)))
-                                if abs(angle - 90) > 15:
-                                    is_rectangle = False
-                                    break
+                                angles.append(angle)
                         
-                        if is_rectangle:
+                        # Check for rectangle (all angles ~90 degrees)
+                        if all(85 < angle < 95 for angle in angles):
                             shapes.append(('rectangle', rect_points, color))
                             continue
+                        
+                        # Check for diamond/rhombus (all sides equal within 15% tolerance)
+                        side_ratio = np.std(side_lengths)/np.mean(side_lengths)
+                        if side_ratio < 0.15:  # All sides roughly equal
+                            shapes.append(('diamond', rect_points, color))
+                            continue
+                        
+                        # Default quadrilateral - will be converted to diamond if diamond_mode is on
+                        shapes.append(('quadrilateral', rect_points, color))
+                        continue
                     
-                    shapes.append(('polygon', [point[0] for point in approx], color))
+                    # Default polygon classification
+                    shapes.append(('polygon', vertices, color))
                     
                 except Exception as e:
                     print(f"Error processing contour: {e}")
@@ -366,7 +448,7 @@ class Shape3DConverter:
             print(f"Shape detection error: {e}")
         
         return shapes
-
+    
     def is_heart_shape(self, contour, image):
         try:
             if len(contour) < 10:
@@ -533,6 +615,76 @@ class Shape3DConverter:
             
         new_points[-1] = contour[-1]
         return new_points
+    
+    
+    def create_diamond_mesh(self, vertices_2d, height, color):
+        """Create a 3D diamond mesh from quadrilateral base"""
+        vertices_3d = []
+        faces = []
+        colors = []
+        
+        try:
+            if len(vertices_2d) != 4:
+                return [], [], []
+            
+            vertices_2d = np.array(vertices_2d, dtype=np.float32)
+            if np.any(np.isnan(vertices_2d)) or np.any(np.isinf(vertices_2d)):
+                return [], [], []
+            
+            # Calculate center and size
+            center_x, center_y = np.mean(vertices_2d[:,0]), np.mean(vertices_2d[:,1])
+            max_dim = max(np.max(vertices_2d[:,0]) - np.min(vertices_2d[:,0]),
+                        np.max(vertices_2d[:,1]) - np.min(vertices_2d[:,1]))
+            
+            # Create base vertices (at z=0)
+            for x, y in vertices_2d:
+                vertices_3d.append([x, y, 0])
+                colors.append(color)
+            
+            # Add apex vertices (top and bottom points)
+            apex_top_idx = len(vertices_3d)
+            top_height = height * 1.5  # Taller top for diamond shape
+            vertices_3d.append([center_x, center_y, top_height])
+            colors.append(color)
+            
+            apex_bottom_idx = len(vertices_3d)
+            bottom_height = height * 1.0  # Bottom point
+            vertices_3d.append([center_x, center_y, -bottom_height])
+            colors.append(color)
+            
+            # Create quadrilateral base face
+            faces.append([0, 1, 2, 3])
+            
+            # Create side faces connecting base to apexes
+            for i in range(4):
+                next_i = (i + 1) % 4
+                # Top faces
+                faces.append([i, next_i, apex_top_idx])
+                # Bottom faces
+                faces.append([i, apex_bottom_idx, next_i])
+            
+            # Add center point for better shading
+            center_idx = len(vertices_3d)
+            vertices_3d.append([center_x, center_y, 0])
+            colors.append(color)
+            
+            # Add middle faces connecting to center
+            for i in range(4):
+                next_i = (i + 1) % 4
+                faces.append([i, next_i, center_idx])
+            
+        except Exception as e:
+            print(f"Diamond mesh error: {e}")
+            import traceback
+            traceback.print_exc()
+            return [], [], []
+        
+        return vertices_3d, faces, colors
+
+    def create_triangle_mesh(self, vertices_2d, height, color):
+        """Create a regular extruded triangle mesh"""
+        return self.create_polygon_mesh(vertices_2d, height, color)
+
 
     def create_fraction_mesh(self, points, height, color):
         vertices_3d = []
@@ -790,6 +942,136 @@ class Shape3DConverter:
             return [], [], []
             
         return vertices_3d, faces, colors
+    
+    def create_volumetric_star_mesh(self, points, height, color):
+        """
+        Create a star with an extruding center point, like the pyramid mode for triangles
+        
+        Args:
+            points: The points from the detected contour (used only for position/size)
+            height: The height/thickness of the star
+            color: The color for the star
+            
+        Returns:
+            vertices, faces, colors for the star
+        """
+        vertices = []
+        faces = []
+        colors = []
+        
+        try:
+            # Calculate center from input points
+            points = np.array(points, dtype=np.float32)
+            center_x, center_y = np.mean(points[:,0]), np.mean(points[:,1])
+            
+            # Calculate max radius from points (for sizing)
+            distances = np.sqrt((points[:,0] - center_x)**2 + (points[:,1] - center_y)**2)
+            outer_radius = np.max(distances)
+            inner_radius = outer_radius * 0.4  # Standard ratio for stars
+            
+            # Number of points for the star
+            num_points = 5
+            
+            # Apply extrusion_strength to height for the center point
+            center_height = height * self.extrusion_strength
+            
+            # Create star perimeter points (all at z=0, like the pyramid base)
+            perimeter_start = len(vertices)
+            for i in range(num_points * 2):
+                angle = 2 * np.pi * i / (num_points * 2)
+                radius = inner_radius if i % 2 else outer_radius
+                
+                x = center_x + radius * np.cos(angle - np.pi/2)
+                y = center_y + radius * np.sin(angle - np.pi/2)
+                
+                # All perimeter points at z=0 (flat base)
+                vertices.append([x, y, 0])
+                colors.append(color)
+            
+            # Add top center apex point
+            top_apex_idx = len(vertices)
+            vertices.append([center_x, center_y, center_height])  # Top center point
+            colors.append(color)
+            
+            # Add bottom center apex point
+            bottom_apex_idx = len(vertices)
+            vertices.append([center_x, center_y, -center_height])  # Bottom center point
+            colors.append(color)
+            
+            # Create top faces connecting perimeter to top apex
+            for i in range(num_points * 2):
+                next_i = (i + 1) % (num_points * 2)
+                # Connect adjacent perimeter points to top apex
+                faces.append([perimeter_start + i, perimeter_start + next_i, top_apex_idx])
+            
+            # Create bottom faces connecting perimeter to bottom apex
+            for i in range(num_points * 2):
+                next_i = (i + 1) % (num_points * 2)
+                # Connect adjacent perimeter points to bottom apex (reverse winding)
+                faces.append([perimeter_start + next_i, perimeter_start + i, bottom_apex_idx])
+            
+            return vertices, faces, colors
+                    
+        except Exception as e:
+            print(f"Star mesh error: {e}")
+            import traceback
+            traceback.print_exc()
+            return [], [], []
+
+    def create_pyramid_mesh(self, vertices_2d, height, color):
+        """
+        Create a 3D pyramid mesh from a triangle base
+        
+        Args:
+            vertices_2d (list): List of 3 points defining the base triangle
+            height (float): Height of the pyramid
+            color (list): RGBA color for the pyramid
+        
+        Returns:
+            tuple: (vertices, faces, colors) for the pyramid
+        """
+        vertices_3d = []
+        faces = []
+        colors = []
+        
+        try:
+            if len(vertices_2d) != 3:
+                return [], [], []
+            
+            vertices_2d = np.array(vertices_2d, dtype=np.float32)
+            if np.any(np.isnan(vertices_2d)) or np.any(np.isinf(vertices_2d)):
+                return [], [], []
+            
+            # Calculate center of the base triangle
+            center_x, center_y = np.mean(vertices_2d[:,0]), np.mean(vertices_2d[:,1])
+            
+            # Create base triangle vertices (at z=0)
+            for x, y in vertices_2d:
+                vertices_3d.append([x, y, 0])
+                colors.append(color)
+            
+            # Add apex vertex
+            apex_idx = len(vertices_3d)
+            vertices_3d.append([center_x, center_y, height])
+            colors.append(color)
+            
+            # Create triangular base face
+            faces.append([0, 1, 2])
+            
+            # Create side faces connecting base to apex
+            faces.append([0, 1, apex_idx])
+            faces.append([1, 2, apex_idx])
+            faces.append([2, 0, apex_idx])
+            
+        except Exception as e:
+            print(f"Pyramid mesh error: {e}")
+            import traceback
+            traceback.print_exc()
+            return [], [], []
+        
+        return vertices_3d, faces, colors
+    
+    
 
     def create_circle_mesh(self, center, radius, height, color):
         vertices = []
@@ -928,119 +1210,113 @@ class Shape3DConverter:
         
         return vertices, faces, colors
     
+
     def create_star_mesh(self, points, height, color):
+        """Create a 3D star mesh with proper geometry"""
         vertices_3d = []
         faces = []
         colors = []
         
         try:
-            if len(points) < 8:
-                return vertices_3d, faces, colors
-            
+            # Get center of the star from input points
             points = np.array(points, dtype=np.float32)
-            if np.any(np.isnan(points)) or np.any(np.isinf(points)):
-                return vertices_3d, faces, colors
-            
             center_x, center_y = np.mean(points[:,0]), np.mean(points[:,1])
-            n = len(points)
             
-            if not self.true_3d_mode:  # Removed heart_3d_mode check
-                # Standard extrusion
-                for x, y in points:
-                    vertices_3d.append([x, y, 0])
-                    colors.append(color)
+            # Calculate maximum radius from the points
+            distances = np.sqrt((points[:,0] - center_x)**2 + (points[:,1] - center_y)**2)
+            outer_radius = np.max(distances)
+            inner_radius = outer_radius * 0.4  # Standard ratio for star points
+            
+            # Number of points for a standard star
+            num_points = 5
+            
+            # Create vertices for the star
+            vertices = []
+            
+            # Center point (at z=0)
+            vertices.append([center_x, center_y, 0])
+            
+            # Create points around the star (on XY plane)
+            for i in range(num_points * 2):
+                angle = 2 * np.pi * i / (num_points * 2)
+                radius = inner_radius if i % 2 else outer_radius
                 
-                back_start = n
-                for x, y in points:
-                    vertices_3d.append([x, y, height * self.extrusion_strength])
-                    colors.append(color)
+                x = center_x + radius * np.cos(angle - np.pi/2)  # -pi/2 to start at top
+                y = center_y + radius * np.sin(angle - np.pi/2)
                 
-                center_front = len(vertices_3d)
-                vertices_3d.append([center_x, center_y, 0])
-                colors.append(color)
+                vertices.append([x, y, 0])
+            
+            # Create different star types based on true_3d_mode
+            if self.true_3d_mode:
+                # Add top and bottom apex points for true 3D star
+                front_apex_idx = len(vertices)
+                vertices.append([center_x, center_y, height])  # Top apex
+                back_apex_idx = len(vertices)
+                vertices.append([center_x, center_y, -height/2])  # Bottom apex
                 
-                for i in range(n):
-                    faces.append([center_front, i, (i+1)%n])
+                # Create faces for 3D star
+                # Top faces (connecting to top apex)
+                for i in range(num_points * 2):
+                    next_i = (i + 1) % (num_points * 2)
+                    faces.append([i + 1, next_i + 1, front_apex_idx])
                 
-                center_back = len(vertices_3d)
-                vertices_3d.append([center_x, center_y, height * self.extrusion_strength])  # Apply extrusion_strength here too
-                colors.append(color)
+                # Bottom faces (connecting to bottom apex)
+                for i in range(num_points * 2):
+                    next_i = (i + 1) % (num_points * 2)
+                    faces.append([next_i + 1, i + 1, back_apex_idx])
                 
-                for i in range(n):
-                    faces.append([center_back, back_start+(i+1)%n, back_start+i])
-                
-                for i in range(n):
-                    next_i = (i+1)%n
-                    faces.append([i, next_i, back_start+next_i])
-                    faces.append([i, back_start+next_i, back_start+i])
+                # Base faces (connecting to center)
+                for i in range(num_points * 2):
+                    next_i = (i + 1) % (num_points * 2)
+                    faces.append([0, i + 1, next_i + 1])
             else:
-                # Create a 3D star with pointed tips
-                distances = np.sqrt(np.sum((points - np.array([center_x, center_y]))**2, axis=1))
-                max_radius = np.max(distances)
-                depth = max_radius * 0.5 * height
-                
-                for x, y in points:
-                    vertices_3d.append([x, y, -depth/4])
-                    colors.append(color)
-                
-                back_start = n
-                for x, y in points:
-                    vertices_3d.append([x, y, depth/4])
-                    colors.append(color)
-                
-                front_center = len(vertices_3d)
-                vertices_3d.append([center_x, center_y, -depth/4])
-                colors.append(color)
-                
-                back_center = len(vertices_3d)
-                vertices_3d.append([center_x, center_y, depth/4])
-                colors.append(color)
-                
-                for i in range(n):
-                    faces.append([front_center, i, (i+1)%n])
-                    faces.append([back_center, back_start+(i+1)%n, back_start+i])
-                
-                for i in range(n):
-                    next_i = (i+1)%n
-                    faces.append([i, next_i, back_start+next_i])
-                    faces.append([i, back_start+next_i, back_start+i])
-                
-                # Add pointed tips
-                point_indices = []
-                for i in range(n):
-                    prev_i = (i-1)%n
-                    next_i = (i+1)%n
+                # For extrusion, create back vertices
+                back_start = len(vertices)
+                for i in range(num_points * 2):
+                    angle = 2 * np.pi * i / (num_points * 2)
+                    radius = inner_radius if i % 2 else outer_radius
                     
-                    if (distances[i] > distances[prev_i] and 
-                        distances[i] > distances[next_i] and 
-                        distances[i] > 0.8 * max_radius):
-                        point_indices.append(i)
-                
-                for idx in point_indices:
-                    x, y = points[idx]
-                    dx, dy = x - center_x, y - center_y
-                    dist = np.sqrt(dx*dx + dy*dy)
+                    x = center_x + radius * np.cos(angle - np.pi/2)
+                    y = center_y + radius * np.sin(angle - np.pi/2)
                     
-                    if dist > 0:
-                        nx, ny = dx/dist, dy/dist
-                        tip_x = center_x + nx * max_radius * 1.2
-                        tip_y = center_y + ny * max_radius * 1.2
-                        
-                        tip_idx = len(vertices_3d)
-                        vertices_3d.append([tip_x, tip_y, 0])
-                        colors.append(color)
-                        
-                        faces.append([tip_idx, idx, (idx+1)%n])
-                        faces.append([tip_idx, back_start+idx, back_start+(idx+1)%n])
-                        
-                        faces.append([tip_idx, idx, back_start+idx])
-                        faces.append([tip_idx, (idx+1)%n, back_start+(idx+1)%n])
+                    vertices.append([x, y, height * self.extrusion_strength])
+                
+                # Add center vertices (front and back)
+                front_center = len(vertices)
+                vertices.append([center_x, center_y, 0])
+                back_center = len(vertices)
+                vertices.append([center_x, center_y, height * self.extrusion_strength])
+                
+                # Front faces (connecting to front center)
+                for i in range(num_points * 2):
+                    next_i = (i + 1) % (num_points * 2)
+                    faces.append([front_center, i + 1, next_i + 1])
+                
+                # Back faces (connecting to back center)
+                for i in range(num_points * 2):
+                    next_i = (i + 1) % (num_points * 2)
+                    # Note reversed winding order for correct normals
+                    faces.append([back_center, back_start + next_i, back_start + i])
+                
+                # Side faces
+                for i in range(num_points * 2):
+                    next_i = (i + 1) % (num_points * 2)
+                    # First triangle
+                    faces.append([i + 1, next_i + 1, back_start + next_i])
+                    # Second triangle
+                    faces.append([i + 1, back_start + next_i, back_start + i])
+            
+            # Create colors - use the input color for all vertices
+            for _ in range(len(vertices)):
+                colors.append(color)
+            
+            return vertices, faces, colors
                 
         except Exception as e:
             print(f"Star mesh error: {e}")
+            import traceback
+            traceback.print_exc()
             return [], [], []
-        
-        return vertices_3d, faces, colors
     
     def create_heart_mesh(self, points, height, color):
         vertices = []
@@ -1103,7 +1379,26 @@ class Shape3DConverter:
         
         for shape in shapes:
             shape_type, params, color = shape
-            if shape_type == 'circle':
+            print(f"Processing shape: {shape_type}")  # Debug output
+
+            if shape_type == 'star':
+                print(f"Creating star with star_mode={self.star_mode}, true_3d_mode={self.true_3d_mode}")
+                
+                # IMPORTANT FIX: Always use the volumetric implementation for stars when star_mode is enabled
+                # This ensures we create a proper 3D star with separate front and back faces
+                if self.star_mode:
+                    # Use volumetric star (THIS IS THE KEY CHANGE)
+                    print("Using volumetric star implementation")
+                    vertices, faces, colors = self.create_volumetric_star_mesh(
+                        params, height_px, color
+                    )
+                else:
+                    # Fall back to polygon mesh when star mode is off
+                    vertices, faces, colors = self.create_polygon_mesh(
+                        params, height_px, color
+                    )
+                    
+            elif shape_type == 'circle':
                 x, y, radius = params
                 vertices, faces, colors = self.create_circle_mesh(
                     (x, y), radius, height_px, color
@@ -1112,26 +1407,41 @@ class Shape3DConverter:
                 vertices, faces, colors = self.create_heart_mesh(
                     params, height_px, color
                 )
-            elif shape_type == 'star':
-                vertices, faces, colors = self.create_star_mesh(
-                    params, height_px, color
-                )
             elif shape_type == 'fraction':
                 vertices, faces, colors = self.create_fraction_mesh(
                     params, height_px, color
                 )
-            elif shape_type == 'rectangle' and self.true_3d_mode:  # Removed heart_3d_mode check
-                vertices, faces, colors = self.create_rectangle_mesh(
-                    params, height_px, color
-                )
-            else:  # polygon
+            elif shape_type == 'triangle':
+                if self.pyramid_mode:
+                    vertices, faces, colors = self.create_pyramid_mesh(
+                        params, height_px, color
+                    )
+                else:
+                    vertices, faces, colors = self.create_triangle_mesh(
+                        params, height_px, color
+                    )
+            elif shape_type in ['diamond', 'quadrilateral', 'rectangle']:
+                if self.diamond_mode:
+                    vertices, faces, colors = self.create_diamond_mesh(
+                        params, height_px * 1.5, color
+                    )
+                elif shape_type == 'rectangle' and self.true_3d_mode:
+                    vertices, faces, colors = self.create_rectangle_mesh(
+                        params, height_px, color
+                    )
+                else:
+                    vertices, faces, colors = self.create_polygon_mesh(
+                        params, height_px, color
+                    )
+            else:  # polygon or any other shape
                 vertices_2d = params
                 vertices, faces, colors = self.create_polygon_mesh(
                     vertices_2d, height_px, color
                 )
             
-            if self.inflation_enabled and vertices and faces:
-                vertices, faces, colors = self.inflate_mesh(vertices, faces, colors)
+            if vertices and faces:
+                if self.inflation_enabled:
+                    vertices, faces, colors = self.inflate_mesh(vertices, faces, colors)
             
             faces = [[idx + face_offset for idx in face] for face in faces]
             face_offset += len(vertices)
@@ -1399,6 +1709,7 @@ class MainWindow(QMainWindow):
         self.converter = Shape3DConverter()
         self.current_mesh = None
         self.shapes = None
+        self.pyramid_mode = False
         self.processed_image = None
         self.original_image = None
         self.smoothing_factor = 0.0
@@ -1559,12 +1870,31 @@ class MainWindow(QMainWindow):
         self.true_3d_checkbox.setToolTip("Convert to volumetric 3D models")
         self.true_3d_checkbox.stateChanged.connect(self.toggle_true_3d_mode)
         
+        self.pyramid_checkbox = QCheckBox("Pyramid Mode")
+        self.pyramid_checkbox.setToolTip("Convert triangles to 3D pyramids")
+        self.pyramid_checkbox.stateChanged.connect(self.toggle_pyramid_mode)
+        options_layout.addWidget(self.pyramid_checkbox)
+
+        # In the options_group section of init_ui
+        self.star_checkbox = QCheckBox("Star Mode")
+        self.star_checkbox.setToolTip("Convert stars to proper 3D star shapes")
+        self.star_checkbox.stateChanged.connect(self.toggle_star_mode)
+        mode_layout.addWidget(self.star_checkbox)
+
+        #self.diamond_checkbox = QCheckBox("Diamond Mode")
+        #self.diamond_checkbox.setToolTip("Convert quadrilaterals to 3D diamonds")
+        #self.diamond_checkbox.stateChanged.connect(self.toggle_diamond_mode)
+        #mode_layout.addWidget(self.diamond_checkbox)
+
+
+
+        
         #self.inflation_checkbox = QCheckBox("Inflate Shapes")
         #self.inflation_checkbox.setToolTip("Create rounded, inflated versions")
         #self.inflation_checkbox.stateChanged.connect(self.toggle_inflation_mode)
         
         mode_layout.addWidget(self.true_3d_checkbox)
-        #mode_layout.addWidget(self.inflation_checkbox)
+        #mode_layout.addWidget(self.diamond_checkbox)  # Add diamond checkbox to layout
         options_layout.addWidget(mode_widget)
         
         # Inflation controls
@@ -1631,7 +1961,42 @@ class MainWindow(QMainWindow):
         #    lambda state: self.distribution_slider.setEnabled(state == Qt.CheckState.Checked)
         #)
 
-    
+    def toggle_star_mode(self, state):
+        """Toggle star mode for star shapes"""
+        # In PyQt6, CheckState is an enum, need to compare with its value
+        is_enabled = state == Qt.CheckState.Checked.value
+        print(f"Star mode toggled: {is_enabled}")
+        
+        self.converter.set_star_mode(is_enabled)
+        
+        # If we have shapes and one of them is a star, update the 3D model
+        if self.shapes:
+            has_star = any(shape[0] == 'star' for shape in self.shapes)
+            if has_star:
+                print("Star shape found, updating 3D model...")
+                self.update_3d_model()
+
+    def toggle_diamond_mode(self, state):
+        """Toggle diamond mode for quadrilaterals"""
+        is_enabled = state == Qt.CheckState.Checked.value
+        self.converter.set_diamond_mode(is_enabled)
+        
+        # If we have shapes and one of them is a quadrilateral/diamond,
+        # update the 3D model immediately
+        if self.shapes:
+            has_quadrilateral = any(shape[0] in ['quadrilateral', 'diamond', 'rectangle'] 
+                                for shape in self.shapes)
+            if has_quadrilateral:
+                self.update_3d_model()
+        
+    def toggle_pyramid_mode(self, state):
+        """Toggle pyramid mode for triangles"""
+        is_enabled = state == Qt.CheckState.Checked.value
+        self.converter.set_pyramid_mode(is_enabled)
+        
+        # Update the model if shapes are already detected
+        if self.shapes:
+            self.update_3d_model()
 
     def change_units(self, unit):
         """Handle unit system change"""
@@ -1862,7 +2227,7 @@ class MainWindow(QMainWindow):
             self.update_3d_model()
 
     def display_mesh(self, mesh):
-        """Display mesh with realistic rendering and clean grid"""
+        """Display mesh with enhanced visualization for better 3D appearance"""
         self.viewer.clear()
         
         try:
@@ -1877,21 +2242,22 @@ class MainWindow(QMainWindow):
             else:
                 colors = np.ones((len(faces), 4)) * [0.5, 0.5, 0.5, 1.0]
             
-            # Enhance colors for more realistic appearance
-            enhanced_colors = colors.copy()
-            enhanced_colors[:, 0:3] = np.clip(enhanced_colors[:, 0:3] * 1.2, 0, 1)
-                
             # Create the mesh item with improved rendering settings
             mesh_item = gl.GLMeshItem(
                 vertexes=vertices,
                 faces=faces,
-                faceColors=enhanced_colors,
-                smooth=True,
-                shader='shaded',
+                faceColors=colors,
+                smooth=True,  # Enable smooth shading
+                shader='shaded',  # Use shaded shader for better 3D appearance
                 glOptions='opaque',
-                drawEdges=False)
+                drawEdges=False,  # Turn on edges for better visibility
+                edgeColor=(0.3, 0.3, 0.3, 0.8)  # Dark gray edges
+            )
                 
             self.viewer.addItem(mesh_item)
+            
+            # Set background color to black for better contrast
+            self.viewer.setBackgroundColor('black')
             
             # Find the minimum z value to place grid at
             z_min = np.min(vertices[:, 2])
@@ -1904,24 +2270,47 @@ class MainWindow(QMainWindow):
             grid.setSize(grid_size, grid_size)
             grid.setSpacing(grid_size/20, grid_size/20)
             grid.translate(0, 0, z_min - 0.02)
-            grid.setColor((0.8, 0.8, 0.8, 0.7))
+            grid.setColor((0.5, 0.5, 0.5, 0.5))  # Gray grid
             self.viewer.addItem(grid)
             
+            # Add coordinate axes for reference
+            axis_length = grid_size * 0.3
+            origin = [0, 0, z_min]
+            
+            x_axis = gl.GLLinePlotItem(
+                pos=np.array([origin, [axis_length, 0, z_min]]), 
+                color=(1, 0, 0, 1), width=2  # Red for X-axis
+            )
+            y_axis = gl.GLLinePlotItem(
+                pos=np.array([origin, [0, axis_length, z_min]]), 
+                color=(0, 1, 0, 1), width=2  # Green for Y-axis
+            )
+            z_axis = gl.GLLinePlotItem(
+                pos=np.array([origin, [0, 0, z_min + axis_length]]), 
+                color=(0, 0, 1, 1), width=2  # Blue for Z-axis
+            )
+            
+            self.viewer.addItem(x_axis)
+            self.viewer.addItem(y_axis)
+            self.viewer.addItem(z_axis)
+            
+            # Set camera position for optimal viewing
             mesh_size = np.max(np.ptp(vertices, axis=0))
-            camera_distance = max(1.0, mesh_size * 1.5)
-            # Set up good lighting with optimal camera position
-            self.viewer.opts['distance'] = camera_distance
-            self.viewer.opts['elevation'] = 30
-            self.viewer.opts['azimuth'] = 45
-
-            grid_size = max(1.0, mesh_size * 1.2)
-            grid.setSize(grid_size, grid_size)
-            grid.setSpacing(grid_size/20, grid_size/20)
+            camera_distance = max(1.5, mesh_size * 2.5)
+            
+            # Set more top-down view to better see the star shape
+            self.viewer.setCameraPosition(
+                distance=camera_distance, 
+                elevation=40,  # Higher elevation to see shape better
+                azimuth=45   # Rotated view angle
+            )
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to display mesh: {str(e)}")
             print(f"Error in display_mesh: {e}")
-            
+            import traceback
+            traceback.print_exc()
+                
         self.viewer.update()
 
     def export_mesh(self):
